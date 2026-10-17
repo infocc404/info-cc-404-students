@@ -48,8 +48,6 @@ const state = {
   redirectAfterLogin: null,
   filesCache: [],
   teacherInfoCache: [], // Cache for teacher_info table
-  scheduleCache: [], // Cache for schedule_entries table
-  scheduleError: null,
   renderedUserId: null,
   sidebarOpen: false,
   searchQuery: "",
@@ -79,7 +77,7 @@ function normalizeSubjectId(sub) {
     if (s.id.toLowerCase() === str) return s.id;
     if (s.aliases && s.aliases.some(a => a.toLowerCase() === str)) return s.id;
     if (s.nameFr.toLowerCase().includes(str) || str.includes(s.id)) return s.id;
-    if (s.nameAr.includes(str)) return s.id;
+    if ((s.nameEn || s.nameFr || s.nameAr).includes(str)) return s.id;
   }
   if (str.includes("algo") || str.includes("sds")) return "algo";
   if (str.includes("arch")) return "arch";
@@ -94,7 +92,8 @@ function normalizeSubjectId(sub) {
 function getSubjectObj(id) {
   return SUBJECT_DEFINITIONS.find(s => s.id === id) || {
     id: id || "autre",
-    nameFr: id === "autre" ? "Autre" : id,
+    nameFr: id === "autre" ? "Other" : id,
+    nameEn: id === "autre" ? "Other" : id,
     nameAr: id === "autre" ? "أخرى / عام" : id
   };
 }
@@ -224,7 +223,7 @@ supabase.auth.onAuthStateChange((event, session) => {
       if (event === "SIGNED_IN" && state.renderedUserId === state.user.id) return;
 
       await fetchRoleAndGroup();
-      await Promise.all([loadFilesCache(), loadTeacherInfoCache(), loadScheduleCache()]);
+      await Promise.all([loadFilesCache(), loadTeacherInfoCache()]);
       state.renderedUserId = state.user.id;
 
       const target = state.redirectAfterLogin || normalizeHash(location.hash);
@@ -239,7 +238,6 @@ supabase.auth.onAuthStateChange((event, session) => {
       state.studentGroup = null;
       state.filesCache = [];
       state.teacherInfoCache = [];
-      state.scheduleCache = [];
       location.hash = "#/";
       renderLoggedOut();
     }
@@ -278,27 +276,6 @@ async function loadTeacherInfoCache() {
   } catch (e) {
     console.error("Error loading teacher_info cache:", e);
     state.teacherInfoCache = [];
-  }
-}
-
-// Cache schedule_entries table (timetable, managed by owner/admin)
-async function loadScheduleCache() {
-  try {
-    const { data, error } = await supabase
-      .from("schedule_entries")
-      .select("*")
-      .order("start_time", { ascending: true });
-    if (!error && data) {
-      state.scheduleCache = data;
-      state.scheduleError = null;
-    } else {
-      state.scheduleCache = [];
-      state.scheduleError = error ? error.message : null;
-    }
-  } catch (e) {
-    console.error("Error loading schedule cache:", e);
-    state.scheduleCache = [];
-    state.scheduleError = String(e && e.message || e);
   }
 }
 
@@ -544,7 +521,7 @@ function renderPasswordRecoveryScreen() {
       alert("تم تحديث كلمة المرور بنجاح!");
       location.hash = "#/";
       await fetchRoleAndGroup();
-      await Promise.all([loadFilesCache(), loadTeacherInfoCache(), loadScheduleCache()]);
+      await Promise.all([loadFilesCache(), loadTeacherInfoCache()]);
       state.renderedUserId = state.user ? state.user.id : null;
       renderApp();
     }
@@ -559,6 +536,30 @@ function renderApp() {
   }
   if (!state.user) {
     renderLoggedOut();
+    return;
+  }
+
+  if (state.role === "suspended") {
+    rootEl.innerHTML = `
+      <div style="min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--cream,#fbf7f0);">
+        <div class="content-card" style="max-width:560px;text-align:center;padding:28px;">
+          <h2 style="color:var(--brown-dark);margin-bottom:10px;">تم إيقاف هذا الحساب</h2>
+          <p style="color:var(--muted);line-height:1.9;">تم إيقاف الوصول إلى المنصة من قبل المالك. إذا كنت تعتقد أن هذا الإجراء حدث بالخطأ، تواصل مع إدارة المنصة.</p>
+          <button type="button" class="btn-primary" id="suspendedLogoutBtn" style="width:auto;margin:16px auto 0;">تسجيل الخروج</button>
+        </div>
+      </div>`;
+    document.getElementById("suspendedLogoutBtn").onclick = async () => {
+      await supabase.auth.signOut();
+      state.session = null;
+      state.user = null;
+      state.role = "student";
+      state.uploaderGroup = null;
+      state.studentGroup = null;
+      state.filesCache = [];
+      state.teacherInfoCache = [];
+      state.renderedUserId = null;
+      renderLoggedOut("تم تسجيل الخروج بنجاح.");
+    };
     return;
   }
 
@@ -609,6 +610,7 @@ function renderApp() {
                  </a>`
               : ""
           }
+          ${isOwner ? `<a href="#/owner-users" class="nav-link ${hash === "#/owner-users" ? "active" : ""}"><span>لوحة المالك</span></a>` : ""}
           <a href="#/compte" class="nav-link ${hash === "#/compte" ? "active" : ""}">
             <span>حسابي</span>
           </a>
@@ -671,6 +673,18 @@ function getRoleBadgeText(role, uploaderGroup) {
   return "طالب";
 }
 
+// owner_list_users has existed with two column naming conventions in deployed
+// databases. Normalize both to avoid empty administrator/head tables.
+function listedUserRole(user) {
+  return user?.role ?? user?.user_role ?? user?.current_role ?? "student";
+}
+function listedUserGroup(user) {
+  return user?.group_no ?? user?.uploader_group ?? user?.signup_group ?? null;
+}
+function listedUserId(user) {
+  return user?.id ?? user?.user_id ?? null;
+}
+
 function attachShellEvents() {
   const sidebar = document.getElementById("appSidebar");
   const backdrop = document.getElementById("sidebarBackdrop");
@@ -698,7 +712,6 @@ function attachShellEvents() {
       state.uploaderGroup = null;
       state.filesCache = [];
       state.teacherInfoCache = [];
-      state.scheduleCache = [];
       state.renderedUserId = null;
       location.hash = "#/";
       renderLoggedOut("تم تسجيل الخروج بنجاح.");
@@ -757,16 +770,45 @@ function attachShellEvents() {
   }
 }
 
+// 10. File scope helpers. The database group assignment is authoritative;
+// when legacy rows have a NULL group_no, infer a group only from a trusted gN/ storage path.
+const SCHEDULE_PDF_SUBJECT = "__schedule_pdf__";
+
+function isScheduleProgramFile(file) {
+  return String(file?.subject || "") === SCHEDULE_PDF_SUBJECT;
+}
+
+function getFileGroupNo(file) {
+  const explicit = Number(file?.group_no);
+  if (Number.isInteger(explicit) && explicit >= 1 && explicit <= 10) return explicit;
+  const path = String(file?.path || "");
+  const match = path.match(/^g(10|[1-9])\//);
+  return match ? Number(match[1]) : null;
+}
+
+function isSharedFile(file) {
+  const path = String(file?.path || "");
+  return file?.group_no == null && path.startsWith("common/");
+}
+
 // 10. FILTER ACCESSIBLE FILES FOR THE USER
 function getAccessibleFiles() {
   if (state.role === "owner" || state.role === "admin") return state.filesCache;
-  const sg = state.studentGroup;
-  return state.filesCache.filter(f => {
-    if (f.kind === "cours") return true; // Cours is available to all
-    if (f.group_no === null || f.group_no === undefined) return true;
-    if (!sg) return false; // Default deny if user has no trusted student group assigned
-    return f.group_no === sg;
+  const group = state.role === "uploader" ? state.uploaderGroup : state.studentGroup;
+  return state.filesCache.filter(file => {
+    // Course lectures are shared content; other legacy rows without a group are
+    // not automatically shared unless stored under common/.
+    if (file.kind === "cours" && (isSharedFile(file) || (file.group_no == null && getFileGroupNo(file) == null))) return true;
+    const fileGroup = getFileGroupNo(file);
+    if (fileGroup != null) return Number(group) === fileGroup;
+    return isSharedFile(file);
   });
+}
+
+function isFileForGroup(file, groupNo) {
+  const fileGroup = getFileGroupNo(file);
+  if (fileGroup != null) return fileGroup === Number(groupNo);
+  return isSharedFile(file);
 }
 
 // 11. ROUTE DISPATCHER
@@ -831,6 +873,16 @@ function dispatchRoute(hash) {
       return;
     }
     renderUploadView(page);
+    return;
+  }
+
+  // #/owner-users — owner-only user directory and account suspension controls
+  if (hash === "#/owner-users") {
+    if (state.role !== "owner") {
+      renderAccessDenied(page);
+      return;
+    }
+    renderOwnerUsersView(page);
     return;
   }
 
@@ -930,7 +982,7 @@ function renderHomeView(page) {
                     <th>المادة</th>
                     <th>النوع</th>
                     <th>التاريخ</th>
-                    <th>إجراء</th>
+                    <th>Action</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -942,7 +994,7 @@ function renderHomeView(page) {
                           <strong>${escapeHtml(f.title)}</strong>
                           ${isNew ? '<span class="badge-new">جديد</span>' : ''}
                         </td>
-                        <td>${escapeHtml(getSubjectObj(normalizeSubjectId(f.subject)).nameFr || f.subject)}</td>
+                        <td>${escapeHtml(getSubjectObj(normalizeSubjectId(f.subject)).nameEn || getSubjectObj(normalizeSubjectId(f.subject)).nameFr || f.subject)}</td>
                         <td><span class="badge-tag">${escapeHtml(f.kind)}</span></td>
                         <td class="mono" style="font-size: 12px;">${formatDate(f.created_at)}</td>
                         <td>
@@ -1031,7 +1083,7 @@ function renderGroupDetailView(page, groupNo, tab = "cours", subjectId = null) {
 
     <div class="page-banner">
       <h2>الفوج <span class="mono">G${groupNo}</span></h2>
-      <p>تصفح مقاييس وملفات الفوج حسب نوع الحصة.</p>
+      <p>Browse your group’s subjects and study files by category.</p>
     </div>
 
     <div class="group-tabs">
@@ -1058,28 +1110,29 @@ function renderGroupDetailView(page, groupNo, tab = "cours", subjectId = null) {
   if (tab === "cours") {
     tabContainer.innerHTML = `
       <div class="content-card">
-        <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 14px;">محاضرات المقاييس (Cours)</h3>
+        <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 14px;">Course Lectures (Cours)</h3>
         <div class="table-responsive">
           <table class="data-table">
             <thead>
               <tr>
-                <th>المقياس (بالعربية / Français)</th>
-                <th>أستاذ المحاضرة</th>
-                <th>عدد الملفات</th>
-                <th>إجراء</th>
+                <th>Subject</th>
+                <th>Course Teacher</th>
+                <th>Files</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
               ${SUBJECT_DEFINITIONS.map(sub => {
                 const count = state.filesCache.filter(f =>
-                  f.kind === "cours" && normalizeSubjectId(f.subject) === sub.id
+                  f.kind === "cours" &&
+                  normalizeSubjectId(f.subject) === sub.id &&
+                  (isSharedFile(f) || (f.group_no == null && getFileGroupNo(f) == null) || isFileForGroup(f, groupNo))
                 ).length;
                 const teacher = getResolvedTeacher("cours", sub.id, 0);
                 return `
                   <tr>
                     <td>
-                      <strong>${escapeHtml(sub.nameAr)}</strong>
-                      <div class="mono" style="font-size: 12px; color: var(--muted);">${escapeHtml(sub.nameFr)}</div>
+                      <strong>${escapeHtml((sub.nameEn || sub.nameFr || sub.nameAr))}</strong>
                     </td>
                     <td>
                       <div style="display: flex; align-items: center; gap: 8px; justify-content: flex-start; flex-wrap: wrap;">
@@ -1114,22 +1167,22 @@ function renderGroupDetailView(page, groupNo, tab = "cours", subjectId = null) {
       state.filesCache.some(f =>
         f.kind === "td" &&
         normalizeSubjectId(f.subject) === sub.id &&
-        (f.group_no === groupNo || f.group_no === null)
+        isFileForGroup(f, groupNo)
       )
     );
 
     tabContainer.innerHTML = `
       <div class="content-card">
-        <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 14px;">حصص الأعمال الموجهة (TD) — الفوج G${groupNo}</h3>
+        <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 14px;">Tutorial Sessions (TD) — Group G${groupNo}</h3>
         ${validSubs.length === 0 ? `<p style="color: var(--muted);">لم تُضف حصص TD لهذا الفوج بعد.</p>` : `
           <div class="table-responsive">
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>المقياس</th>
-                  <th>أستاذ الـ TD</th>
-                  <th>عدد الملفات</th>
-                  <th>إجراء</th>
+                  <th>Subject</th>
+                  <th>TD Teacher</th>
+                  <th>Files</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -1137,14 +1190,13 @@ function renderGroupDetailView(page, groupNo, tab = "cours", subjectId = null) {
                   const count = state.filesCache.filter(f =>
                     f.kind === "td" &&
                     normalizeSubjectId(f.subject) === sub.id &&
-                    (f.group_no === groupNo || f.group_no === null)
+                    isFileForGroup(f, groupNo)
                   ).length;
                   const teacher = getResolvedTeacher("td", sub.id, groupNo);
                   return `
                     <tr>
                       <td>
-                        <strong>${escapeHtml(sub.nameAr)}</strong>
-                        <div class="mono" style="font-size: 12px; color: var(--muted);">${escapeHtml(sub.nameFr)}</div>
+                        <strong>${escapeHtml((sub.nameEn || sub.nameFr || sub.nameAr))}</strong>
                       </td>
                       <td>
                         <div style="display: flex; align-items: center; gap: 8px; justify-content: flex-start; flex-wrap: wrap;">
@@ -1180,22 +1232,22 @@ function renderGroupDetailView(page, groupNo, tab = "cours", subjectId = null) {
       state.filesCache.some(f =>
         f.kind === "tp" &&
         normalizeSubjectId(f.subject) === sub.id &&
-        (f.group_no === groupNo || f.group_no === null)
+        isFileForGroup(f, groupNo)
       )
     );
 
     tabContainer.innerHTML = `
       <div class="content-card">
-        <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 14px;">حصص الأعمال التطبيقية (TP) — الفوج G${groupNo}</h3>
+        <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 14px;">Practical Sessions (TP) — Group G${groupNo}</h3>
         ${validSubs.length === 0 ? `<p style="color: var(--muted);">لم تُضف حصص TP لهذا الفوج بعد.</p>` : `
           <div class="table-responsive">
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>المقياس</th>
-                  <th>أستاذ الـ TP</th>
-                  <th>عدد الملفات</th>
-                  <th>إجراء</th>
+                  <th>Subject</th>
+                  <th>TP Teacher</th>
+                  <th>Files</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -1203,14 +1255,13 @@ function renderGroupDetailView(page, groupNo, tab = "cours", subjectId = null) {
                   const count = state.filesCache.filter(f =>
                     f.kind === "tp" &&
                     normalizeSubjectId(f.subject) === sub.id &&
-                    (f.group_no === groupNo || f.group_no === null)
+                    isFileForGroup(f, groupNo)
                   ).length;
                   const teacher = getResolvedTeacher("tp", sub.id, groupNo);
                   return `
                     <tr>
                       <td>
-                        <strong>${escapeHtml(sub.nameAr)}</strong>
-                        <div class="mono" style="font-size: 12px; color: var(--muted);">${escapeHtml(sub.nameFr)}</div>
+                        <strong>${escapeHtml((sub.nameEn || sub.nameFr || sub.nameAr))}</strong>
                       </td>
                       <td>
                         <div style="display: flex; align-items: center; gap: 8px; justify-content: flex-start; flex-wrap: wrap;">
@@ -1239,7 +1290,7 @@ function renderGroupDetailView(page, groupNo, tab = "cours", subjectId = null) {
     `;
   } else if (tab === "exam") {
     const examFiles = state.filesCache.filter(f =>
-      f.kind === "exam" && (f.group_no === groupNo || f.group_no === null)
+      f.kind === "exam" && isFileForGroup(f, groupNo)
     );
 
     tabContainer.innerHTML = `
@@ -1253,14 +1304,14 @@ function renderGroupDetailView(page, groupNo, tab = "cours", subjectId = null) {
                   <th>العنوان</th>
                   <th>المادة</th>
                   <th>تاريخ الرفع</th>
-                  <th>إجراء</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
                 ${examFiles.map(f => `
                   <tr>
                     <td><strong>${escapeHtml(f.title)}</strong></td>
-                    <td>${escapeHtml(getSubjectObj(normalizeSubjectId(f.subject)).nameFr || f.subject)}</td>
+                    <td>${escapeHtml(getSubjectObj(normalizeSubjectId(f.subject)).nameEn || getSubjectObj(normalizeSubjectId(f.subject)).nameFr || f.subject)}</td>
                     <td class="mono" style="font-size: 12px;">${formatDate(f.created_at)}</td>
                     <td>
                       <a href="#/voir/${f.id}" class="btn-secondary" style="padding: 4px 10px; font-size: 12px; text-decoration: none;">عرض</a>
@@ -1303,7 +1354,7 @@ function openTeacherEditModal(kind, subjectId, groupNo, onSavedCallback) {
   modal.innerHTML = `
     <div class="dialog-box">
       <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 6px;">
-        تعيين / تعديل أستاذ: ${escapeHtml(subObj.nameAr)} (${kind.toUpperCase()})
+        تعيين / تعديل أستاذ: ${escapeHtml((subObj.nameEn || subObj.nameFr || subObj.nameAr))} (${kind.toUpperCase()})
       </h3>
       <p style="font-size: 13px; color: var(--muted); margin-bottom: 14px;">
         نطاق التعديل: <strong>${escapeHtml(targetLabel)}</strong>
@@ -1452,9 +1503,10 @@ function renderSubjectLessonsView(page, groupNo, tab, subjectId) {
     const sMatch = normalizeSubjectId(f.subject) === subjectId;
     if (!sMatch) return false;
     if (tab === "cours") {
-      return f.kind === "cours";
+      return f.kind === "cours" &&
+        (isSharedFile(f) || (f.group_no == null && getFileGroupNo(f) == null) || isFileForGroup(f, groupNo));
     }
-    return f.kind === tab && (f.group_no === groupNo || f.group_no === null);
+    return f.kind === tab && isFileForGroup(f, groupNo);
   }).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
   const tabLabel = tab === "cours" ? "الكور" : tab.toUpperCase();
@@ -1467,11 +1519,11 @@ function renderSubjectLessonsView(page, groupNo, tab, subjectId) {
       <span>›</span>
       <a href="#/groupe/${groupNo}/${tab}">${tabLabel}</a>
       <span>›</span>
-      <span class="current">${escapeHtml(subObj.nameAr)}</span>
+      <span class="current">${escapeHtml((subObj.nameEn || subObj.nameFr || subObj.nameAr))}</span>
     </div>
 
     <div class="page-banner">
-      <h2>${escapeHtml(subObj.nameAr)} (<span class="mono">${escapeHtml(subObj.nameFr)}</span>)</h2>
+      <h2>${escapeHtml((subObj.nameEn || subObj.nameFr || subObj.nameAr))} (<span class="mono">${escapeHtml(subObj.nameFr)}</span>)</h2>
       <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 4px;">
         <span>الأستاذ المشرف: <strong>${renderTeacherDisplayHtml(teacher)}</strong> · الفوج <span class="mono">G${groupNo}</span></span>
         ${
@@ -1530,7 +1582,7 @@ function renderLessonsTableHtml(filesList) {
             <th style="width: 50px;">الرقم</th>
             <th>عنوان الدرس</th>
             <th>تاريخ النشر</th>
-            <th>إجراء</th>
+            <th>Action</th>
           </tr>
         </thead>
         <tbody>
@@ -1585,23 +1637,28 @@ function teacherKindLabel(kind) {
 function renderTeachersView(page, kindFilter = "all") {
   const teachers = collectTeachers().filter(t => kindFilter === "all" || t.assignments.some(a => a.kind === kindFilter));
   const heading = kindFilter === "all" ? "Teachers Directory" : `${teacherKindLabel(kindFilter)} Teachers`;
-  const subjectOptions = SUBJECT_DEFINITIONS.map(sub => `<option value="${escapeHtml(sub.id)}">${escapeHtml(sub.nameFr || sub.id)}</option>`).join("");
+  const subjectOptions = SUBJECT_DEFINITIONS.map(sub => `<option value="${escapeHtml(sub.id)}">${escapeHtml(sub.nameEn || sub.nameEn || sub.nameFr || sub.id)}</option>`).join("");
   page.innerHTML = `
     <div class="page-banner"><h2>${heading}</h2><p>Find each teacher, view their subjects, assigned groups, and related study files.</p></div>
     ${canManageContent() ? `
     <div class="content-card">
-      <h3 style="margin-bottom:8px;">Add / Assign a Teacher</h3>
-      <p style="color:var(--muted);font-size:13px;margin-bottom:14px;">Add a teacher to a subject and choose whether they teach Cours (all groups), TD, or TP (one group).</p>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+        <h3 style="margin:0;color:var(--brown-dark);">إدارة الأساتذة</h3>
+        <button type="button" class="btn-primary" id="teacherCreateToggle" style="width:auto;padding:9px 16px;">إضافة أستاذ</button>
+      </div>
+      <p style="color:var(--muted);font-size:13px;margin-bottom:14px;">اضغط «إضافة أستاذ» لفتح النموذج، ثم حدّد المادة ونوع التدريس والفوج عند الحاجة.</p>
+      <div id="teacherCreatePanel" style="display:none;">
       <div id="teacherCreateError" class="auth-error-box"></div>
       <div id="teacherCreateSuccess" class="auth-success-box"></div>
       <form id="teacherCreateForm" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;align-items:end;">
-        <div class="form-group" style="margin:0;"><label class="form-label" for="teacherCreateName">Teacher name *</label><input id="teacherCreateName" class="form-control" required maxlength="120" placeholder="Full name"></div>
-        <div class="form-group" style="margin:0;"><label class="form-label" for="teacherCreateSubject">Subject *</label><select id="teacherCreateSubject" class="form-control" required>${subjectOptions}</select></div>
-        <div class="form-group" style="margin:0;"><label class="form-label" for="teacherCreateKind">Teaching type *</label><select id="teacherCreateKind" class="form-control" required><option value="cours">Cours — all groups</option><option value="td">TD — one group</option><option value="tp">TP — one group</option></select></div>
-        <div class="form-group" id="teacherCreateGroupWrap" style="margin:0;display:none;"><label class="form-label" for="teacherCreateGroup">Group *</label><select id="teacherCreateGroup" class="form-control">${Array.from({length:10},(_,i)=>`<option value="${i+1}">G${i+1}</option>`).join("")}</select></div>
-        <div class="form-group" style="margin:0;"><label class="form-label" for="teacherCreateEmail">Teacher email (optional)</label><input id="teacherCreateEmail" type="email" class="form-control" placeholder="teacher@university.edu"></div>
-        <button type="submit" class="btn-primary" id="teacherCreateSubmit" style="width:auto;min-height:42px;">Save Teacher</button>
+        <div class="form-group" style="margin:0;"><label class="form-label" for="teacherCreateName">اسم الأستاذ *</label><input id="teacherCreateName" class="form-control" required maxlength="120" placeholder="الاسم الكامل"></div>
+        <div class="form-group" style="margin:0;"><label class="form-label" for="teacherCreateSubject">المادة *</label><select id="teacherCreateSubject" class="form-control" required>${subjectOptions}</select></div>
+        <div class="form-group" style="margin:0;"><label class="form-label" for="teacherCreateKind">نوع التدريس *</label><select id="teacherCreateKind" class="form-control" required><option value="cours">Cours — جميع الأفواج</option><option value="td">TD — فوج محدد</option><option value="tp">TP — فوج محدد</option></select></div>
+        <div class="form-group" id="teacherCreateGroupWrap" style="margin:0;display:none;"><label class="form-label" for="teacherCreateGroup">الفوج *</label><select id="teacherCreateGroup" class="form-control">${Array.from({length:10},(_,i)=>`<option value="${i+1}">G${i+1}</option>`).join("")}</select></div>
+        <div class="form-group" style="margin:0;"><label class="form-label" for="teacherCreateEmail">البريد الإلكتروني للأستاذ (اختياري)</label><input id="teacherCreateEmail" type="email" class="form-control" placeholder="teacher@univ.dz"></div>
+        <button type="submit" class="btn-primary" id="teacherCreateSubmit" style="width:auto;min-height:42px;">حفظ الأستاذ</button>
       </form>
+      </div>
     </div>` : ""}
     <div class="content-card">
       <label class="form-label" for="teacherSearchInput">Search teachers</label>
@@ -1619,6 +1676,15 @@ function renderTeachersView(page, kindFilter = "all") {
     const q = input.value.trim().toLowerCase();
     page.querySelectorAll(".teacher-directory-card").forEach(card => { card.style.display = card.dataset.name.includes(q) ? "" : "none"; });
   });
+  const createToggle = page.querySelector("#teacherCreateToggle");
+  const createPanel = page.querySelector("#teacherCreatePanel");
+  createToggle?.addEventListener("click", () => {
+    const willOpen = createPanel.style.display === "none";
+    createPanel.style.display = willOpen ? "block" : "none";
+    createToggle.textContent = willOpen ? "إغلاق نموذج الإضافة" : "إضافة أستاذ";
+    if (willOpen) page.querySelector("#teacherCreateName")?.focus();
+  });
+
   const createForm = page.querySelector("#teacherCreateForm");
   if (createForm) {
     const kindSelect = page.querySelector("#teacherCreateKind");
@@ -1641,7 +1707,7 @@ function renderTeachersView(page, kindFilter = "all") {
       if (!name || !subjectId || !["cours","td","tp"].includes(kind) || (kind !== "cours" && !(groupNo >= 1 && groupNo <= 10))) {
         errorBox.textContent = "Please complete the teacher, subject, type, and group fields."; errorBox.style.display = "block"; return;
       }
-      submit.disabled = true; submit.textContent = "Saving...";
+      submit.disabled = true; submit.textContent = "جارٍ الحفظ...";
       try {
         let query = supabase.from("teacher_info").select("id").eq("kind",kind).eq("subject_id",subjectId);
         query = groupNo === null ? query.is("group_no",null) : query.eq("group_no",groupNo);
@@ -1653,17 +1719,17 @@ function renderTeachersView(page, kindFilter = "all") {
           : await supabase.from("teacher_info").insert(payload);
         if (result.error) throw new Error(result.error.message);
         await loadTeacherInfoCache();
-        successBox.textContent = `Saved ${name} — ${kind.toUpperCase()} — ${getSubjectObj(subjectId).nameFr || subjectId}${kind === "cours" ? " — all groups" : ` — G${groupNo}`}.`;
+        successBox.textContent = `Saved ${name} — ${kind.toUpperCase()} — ${getSubjectObj(subjectId).nameEn || getSubjectObj(subjectId).nameFr || subjectId}${kind === "cours" ? " — all groups" : ` — G${groupNo}`}.`;
         successBox.style.display = "block";
         page.querySelector("#teacherCreateName").value = "";
         page.querySelector("#teacherCreateEmail").value = "";
         renderTeachersView(page, kindFilter);
       } catch (err) {
-        errorBox.textContent = `Could not save teacher: ${err.message}`;
+        errorBox.textContent = `تعذر حفظ الأستاذ: ${err.message}`;
         errorBox.style.display = "block";
       } finally {
         const currentSubmit = page.querySelector("#teacherCreateSubmit");
-        if (currentSubmit) { currentSubmit.disabled = false; currentSubmit.textContent = "Save Teacher"; }
+        if (currentSubmit) { currentSubmit.disabled = false; currentSubmit.textContent = "حفظ الأستاذ"; }
       }
     });
   }
@@ -1687,331 +1753,207 @@ function renderTeacherProfileView(page, slug) {
     <div class="page-banner"><h2>${escapeHtml(teacher.name)}</h2><p>المواد والأفواج والملفات المرتبطة بتدريس هذا الأستاذ وفق البيانات المتاحة.</p></div>
     <div class="content-card"><h3 style="margin-bottom:12px;">المواد والأفواج</h3>
       <div class="table-responsive"><table class="data-table"><thead><tr><th>Teaching Type</th><th>Subject</th><th>Group</th><th>Action</th></tr></thead><tbody>
-      ${assignments.map(a => { const sub = getSubjectObj(a.subjectId); return `<tr><td>${teacherKindLabel(a.kind)}</td><td>${escapeHtml(sub.nameFr || sub.id)}</td><td>${a.kind === "cours" ? "All groups (G1–G10)" : `G${a.groupNo}`}</td><td><a class="btn-secondary" style="text-decoration:none;padding:4px 8px;" href="#/groupe/${a.kind === "cours" ? (state.studentGroup || 1) : a.groupNo}/${a.kind}/${a.subjectId}">View subject</a></td></tr>`; }).join("")}
+      ${assignments.map(a => { const sub = getSubjectObj(a.subjectId); return `<tr><td>${teacherKindLabel(a.kind)}</td><td>${escapeHtml(sub.nameEn || sub.nameEn || sub.nameFr || sub.id)}</td><td>${a.kind === "cours" ? "All groups (G1–G10)" : `G${a.groupNo}`}</td><td><a class="btn-secondary" style="text-decoration:none;padding:4px 8px;" href="#/groupe/${a.kind === "cours" ? (state.studentGroup || 1) : a.groupNo}/${a.kind}/${a.subjectId}">View subject</a></td></tr>`; }).join("")}
       </tbody></table></div>
     </div>
     <div class="content-card"><h3 style="margin-bottom:12px;">Available Files (${relatedFiles.length})</h3>
-      ${relatedFiles.length ? `<div class="table-responsive"><table class="data-table"><thead><tr><th>File Title</th><th>Subject</th><th>Type</th><th>Group</th><th>Action</th></tr></thead><tbody>${relatedFiles.map(f => `<tr><td>${escapeHtml(f.title)}</td><td>${escapeHtml(getSubjectObj(normalizeSubjectId(f.subject)).nameFr || f.subject)}</td><td>${escapeHtml(teacherKindLabel(f.kind))}</td><td>${f.group_no ? `G${f.group_no}` : "كل الأفواج"}</td><td><a class="btn-secondary" style="text-decoration:none;padding:4px 8px;" href="#/voir/${encodeURIComponent(f.id)}">Open file</a></td></tr>`).join("")}</tbody></table></div>` : `<p style="color:var(--muted);text-align:center;padding:18px;">No accessible files are linked to this teacher yet. Files appear here when uploaded under the matching subject, type, and group.</p>`}
+      ${relatedFiles.length ? `<div class="table-responsive"><table class="data-table"><thead><tr><th>File Title</th><th>Subject</th><th>Type</th><th>Group</th><th>Action</th></tr></thead><tbody>${relatedFiles.map(f => `<tr><td>${escapeHtml(f.title)}</td><td>${escapeHtml(getSubjectObj(normalizeSubjectId(f.subject)).nameEn || getSubjectObj(normalizeSubjectId(f.subject)).nameFr || f.subject)}</td><td>${escapeHtml(teacherKindLabel(f.kind))}</td><td>${f.group_no ? `G${f.group_no}` : "كل الأفواج"}</td><td><a class="btn-secondary" style="text-decoration:none;padding:4px 8px;" href="#/voir/${encodeURIComponent(f.id)}">Open file</a></td></tr>`).join("")}</tbody></table></div>` : `<p style="color:var(--muted);text-align:center;padding:18px;">No accessible files are linked to this teacher yet. Files appear here when uploaded under the matching subject, type, and group.</p>`}
     </div>`;
 }
 
 // 17. PAGE: TIMETABLE (#/horaire)
-// Sessions come from the schedule_entries table. Everyone reads it;
-// only owner/admin can add, edit or delete sessions (enforced by RLS too).
-const DAY_NAMES = ["الأحد", "الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت"];
-const KIND_LABELS = { cours: "Cours", td: "TD", tp: "TP" };
-
-function fmtTime(t) {
-  return String(t || "").slice(0, 5);
-}
-
+// The timetable is a PDF program per group. This intentionally no longer reads
+// schedule_entries, whose legacy columns caused day_of_week/start_time schema errors.
 function renderTimetableView(page) {
-  const canManage = canManageContent();
-  let selectedGroup = state.studentGroup || state.uploaderGroup || 1;
+  const role = state.role;
+  const isOwnerAdmin = role === "owner" || role === "admin";
+  const isUploader = role === "uploader";
+  const canUpload = isOwnerAdmin || isUploader;
+  const ownGroup = isUploader ? Number(state.uploaderGroup) : Number(state.studentGroup);
+  let selectedGroup = isOwnerAdmin ? String(state.studentGroup || 1) : String(ownGroup || 1);
+
+  const groupOptions = [1,2,3,4,5,6,7,8,9,10]
+    .map(g => `<option value="${g}" ${String(g) === selectedGroup ? "selected" : ""}>الفوج ${g}</option>`)
+    .join("");
 
   page.innerHTML = `
     <div class="page-banner">
-      <h2>الجدول الزمني الأسبوعي (<span class="mono">Emploi du Temps</span>)</h2>
-      <p>المحاضرات المشتركة وحصص الـ TD/TP الخاصة بكل فوج.</p>
+      <h2>البرنامج الدراسي (PDF)</h2>
+      <p>تصفّح البرنامج الدراسي الكامل بصيغة PDF بدل إدخال الحصص يدويًا.</p>
     </div>
 
     <div class="content-card">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 12px;">
-        <div style="display: flex; align-items: center; gap: 8px;">
-          <label class="form-label" for="timetableGroupSelect" style="margin: 0;">عرض جدول الفوج:</label>
-          <select id="timetableGroupSelect" class="form-control mono" style="width: auto; padding: 6px 12px; font-weight: 500;">
-            ${[1,2,3,4,5,6,7,8,9,10].map(g => `
-              <option value="${g}" ${g === selectedGroup ? "selected" : ""}>G${g}</option>
-            `).join("")}
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+        <div style="min-width:220px;">
+          <label class="form-label" for="programGroupSelect">عرض برنامج الفوج</label>
+          <select id="programGroupSelect" class="form-control mono" style="max-width:260px;" ${!isOwnerAdmin ? "disabled" : ""}>
+            ${isOwnerAdmin ? `<option value="all">جميع الأفواج</option>` : ""}
+            ${groupOptions}
           </select>
         </div>
-        ${canManage ? `<button type="button" class="btn-primary" id="addSessionBtn" style="width: auto; padding: 8px 16px;">إضافة حصة</button>` : ""}
       </div>
 
-      <div class="timetable-legend">
-        <div class="legend-item">
-          <span class="legend-color" style="background-color: var(--brown);"></span>
-          <span>محاضرة (Cours)</span>
+      ${canUpload ? `
+        <div style="border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:18px;background:var(--cream,#fbf7f0);">
+          <h3 style="font-size:16px;font-weight:700;color:var(--brown-dark);margin-bottom:6px;">إضافة البرنامج PDF</h3>
+          <p style="font-size:13px;color:var(--muted);line-height:1.8;margin-bottom:14px;">ارفع ملف PDF الذي يحتوي على البرنامج الدراسي كاملًا. رئيس القسم يستطيع رفع برنامج فوجه فقط؛ أما المالك والمشرف فيمكنهما اختيار الفوج المستهدف.</p>
+          <div id="programUploadError" class="auth-error-box" role="alert"></div>
+          <div id="programUploadSuccess" class="auth-success-box" role="status"></div>
+          <form id="programUploadForm" style="display:grid;gap:12px;">
+            <div class="form-group" style="margin:0;">
+              <label class="form-label" for="programTitle">عنوان البرنامج *</label>
+              <input id="programTitle" class="form-control" maxlength="160" required placeholder="مثال: البرنامج الدراسي — السداسي الأول">
+            </div>
+            ${isOwnerAdmin ? `
+              <div class="form-group" style="margin:0;">
+                <label class="form-label" for="programUploadGroup">الفوج المستهدف *</label>
+                <select id="programUploadGroup" class="form-control mono" required>
+                  <option value="all">جميع الأفواج (برنامج مشترك)</option>
+                  ${[1,2,3,4,5,6,7,8,9,10].map(g => `<option value="${g}" ${g === Number(state.studentGroup || 1) ? "selected" : ""}>الفوج ${g}</option>`).join("")}
+                </select>
+              </div>` : `
+              <div class="form-group" style="margin:0;">
+                <label class="form-label">الفوج المسموح لك بإدارته</label>
+                <input class="form-control mono" value="الفوج ${ownGroup || "غير محدد"}" disabled>
+              </div>`}
+            <div class="form-group" style="margin:0;">
+              <label class="form-label" for="programPdfFile">ملف البرنامج PDF (حتى 25 ميغابايت) *</label>
+              <input id="programPdfFile" class="form-control" type="file" accept=".pdf,application/pdf" required>
+            </div>
+            <button type="submit" class="btn-primary" id="programUploadSubmit" style="width:auto;justify-self:start;padding:10px 18px;">إضافة البرنامج PDF</button>
+          </form>
         </div>
-        <div class="legend-item">
-          <span class="legend-color" style="background-color: var(--soft); border: 1px solid var(--line);"></span>
-          <span>أعمال موجهة (TD)</span>
-        </div>
-        <div class="legend-item">
-          <span class="legend-color" style="background-color: #fff; border: 1px dashed var(--brown);"></span>
-          <span>أعمال تطبيقية (TP)</span>
-        </div>
-      </div>
+      ` : ""}
 
-      ${canManage && state.scheduleError ? `
-        <div class="auth-error-box" style="display: block; margin-bottom: 12px;">
-          تعذر تحميل الجدول: ${escapeHtml(state.scheduleError)}
-          <br>إذا كان الجدول غير موجود في قاعدة البيانات، شغّل الملف migration_schedule.sql في Supabase (SQL Editor).
-        </div>` : ""}
-
-      <div id="timetableRenderContainer"></div>
+      <div id="programFilesList"></div>
     </div>
   `;
 
-  const container = document.getElementById("timetableRenderContainer");
-  const select = document.getElementById("timetableGroupSelect");
-  const addBtn = document.getElementById("addSessionBtn");
-
-  function draw() {
-    container.innerHTML = generateWeeklyTableHtml(selectedGroup, canManage);
-    if (!canManage) return;
-
-    container.querySelectorAll(".edit-session-btn").forEach(btn => {
-      btn.onclick = () => {
-        const entry = state.scheduleCache.find(e => String(e.id) === btn.getAttribute("data-id"));
-        if (entry) openScheduleModal(entry, selectedGroup, draw);
-      };
-    });
-
-    container.querySelectorAll(".delete-session-btn").forEach(btn => {
-      btn.onclick = async () => {
-        if (!confirm("هل تريد حذف هذه الحصة من الجدول؟")) return;
-        btn.disabled = true;
-        const { error } = await supabase
-          .from("schedule_entries")
-          .delete()
-          .eq("id", btn.getAttribute("data-id"));
-        if (error) {
-          alert(`فشل الحذف: ${error.message}`);
-          btn.disabled = false;
-          return;
-        }
-        await loadScheduleCache();
-        draw();
-      };
-    });
-  }
-
-  select.onchange = () => {
-    selectedGroup = parseInt(select.value, 10);
-    draw();
-  };
-
-  if (addBtn) {
-    addBtn.onclick = () => openScheduleModal(null, selectedGroup, draw);
-  }
-
-  draw();
-}
-
-function generateWeeklyTableHtml(grp, canManage) {
-  // Shared sessions (group_no NULL) + sessions of the selected group
-  const entries = state.scheduleCache.filter(e => e.group_no === null || e.group_no === grp);
-
-  if (entries.length === 0) {
-    return `
-      <div style="text-align: center; padding: 30px; color: var(--muted); font-size: 14px;">
-        لم يُضف الجدول بعد
-        ${canManage ? `<div style="margin-top: 6px; font-size: 13px;">استعمل زر "إضافة حصة" لإضافة أول حصة.</div>` : ""}
-      </div>
-    `;
-  }
-
-  const days = [0, 1, 2, 3, 4];
-  if (entries.some(e => e.day_of_week === 5)) days.push(5);
-  if (entries.some(e => e.day_of_week === 6)) days.push(6);
-
-  const chipHtml = (e) => {
-    const sub = getSubjectObj(e.subject_id);
-    const kind = KIND_LABELS[e.kind] ? e.kind : "cours";
-    const cls = kind === "cours" ? "chip-cours" : kind === "td" ? "chip-td" : "chip-tp";
-    const teacher = getResolvedTeacher(kind, e.subject_id, kind === "cours" ? null : (e.group_no ?? grp));
-    return `
-      <div class="${cls}" style="text-align: right; min-width: 190px;">
-        <div class="mono" style="font-size: 11px;">${escapeHtml(fmtTime(e.start_time))} – ${escapeHtml(fmtTime(e.end_time))}</div>
-        <strong>${KIND_LABELS[kind]} ${escapeHtml(sub.nameFr)}</strong>
-        ${teacher.name ? `<div>${escapeHtml(teacher.name)}</div>` : ""}
-        ${e.room ? `<div class="mono" style="font-size: 11px;">${escapeHtml(e.room)}</div>` : ""}
-        ${e.group_no === null && kind !== "cours" ? `<div style="font-size: 11px;">كل الأفواج</div>` : ""}
-        ${canManage ? `
-          <div style="margin-top: 6px; display: flex; gap: 6px;">
-            <button type="button" class="btn-secondary edit-session-btn" data-id="${e.id}" style="padding: 2px 8px; font-size: 11px;">تعديل</button>
-            <button type="button" class="btn-danger delete-session-btn" data-id="${e.id}" style="padding: 2px 8px; font-size: 11px;">حذف</button>
-          </div>` : ""}
-      </div>
-    `;
-  };
-
-  const rows = days.map(d => {
-    const list = entries
-      .filter(e => e.day_of_week === d)
-      .sort((a, b) => String(a.start_time).localeCompare(String(b.start_time)));
-    const cell = list.length
-      ? `<div style="display: flex; flex-wrap: wrap; gap: 8px;">${list.map(chipHtml).join("")}</div>`
-      : `<span class="chip-empty">—</span>`;
-    return `
-      <tr>
-        <td class="timetable-slot-time">${DAY_NAMES[d]}</td>
-        <td style="text-align: right;">${cell}</td>
-      </tr>
-    `;
-  }).join("");
-
-  return `
-    <div class="timetable-container">
-      <table class="timetable-table" style="min-width: 0;">
-        <thead>
-          <tr><th style="width: 110px;">اليوم</th><th>الحصص</th></tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>
-  `;
-}
-
-// Add / edit one session (owner & admin only)
-function openScheduleModal(entry, defaultGroup, onSaved) {
-  if (!canManageContent()) return;
-
-  const isEdit = !!entry;
-  const v = entry || {
-    day_of_week: 0,
-    start_time: "08:30",
-    end_time: "10:00",
-    subject_id: SUBJECT_DEFINITIONS[0].id,
-    kind: "cours",
-    room: "",
-    group_no: null
-  };
-
-  const modal = document.createElement("div");
-  modal.className = "dialog-overlay";
-  modal.innerHTML = `
-    <div class="dialog-box">
-      <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 14px;">
-        ${isEdit ? "تعديل حصة" : "إضافة حصة"}
-      </h3>
-      <div id="scheduleAlert" class="auth-error-box"></div>
-
-      <form id="scheduleForm">
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;">
-          <div class="form-group">
-            <label class="form-label" for="schDay">اليوم *</label>
-            <select id="schDay" class="form-control" required>
-              ${DAY_NAMES.map((n, i) => `<option value="${i}" ${i === v.day_of_week ? "selected" : ""}>${n}</option>`).join("")}
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="schStart">من *</label>
-            <input type="time" id="schStart" class="form-control mono" value="${escapeHtml(fmtTime(v.start_time))}" required>
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="schEnd">إلى *</label>
-            <input type="time" id="schEnd" class="form-control mono" value="${escapeHtml(fmtTime(v.end_time))}" required>
-          </div>
-        </div>
-
-        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;">
-          <div class="form-group">
-            <label class="form-label" for="schSubject">المقياس *</label>
-            <select id="schSubject" class="form-control" required>
-              ${SUBJECT_DEFINITIONS.map(sb => `<option value="${sb.id}" ${sb.id === v.subject_id ? "selected" : ""}>${escapeHtml(sb.nameAr)}</option>`).join("")}
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="schKind">النوع *</label>
-            <select id="schKind" class="form-control mono" required>
-              <option value="cours" ${v.kind === "cours" ? "selected" : ""}>Cours</option>
-              <option value="td" ${v.kind === "td" ? "selected" : ""}>TD</option>
-              <option value="tp" ${v.kind === "tp" ? "selected" : ""}>TP</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label class="form-label" for="schGroup">الفوج *</label>
-            <select id="schGroup" class="form-control mono" required>
-              <option value="all" ${v.group_no === null ? "selected" : ""}>كل الأفواج</option>
-              ${[1,2,3,4,5,6,7,8,9,10].map(g => `<option value="${g}" ${v.group_no === g ? "selected" : ""}>G${g}</option>`).join("")}
-            </select>
-          </div>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label" for="schRoom">القاعة / المدرج (اختياري)</label>
-          <input type="text" id="schRoom" class="form-control" value="${escapeHtml(v.room || "")}" placeholder="مثال: Amphi A">
-        </div>
-
-        <div style="display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px;">
-          <button type="button" class="btn-secondary" id="schCancelBtn">إلغاء</button>
-          <button type="submit" class="btn-primary" id="schSaveBtn" style="width: auto; min-width: 100px;">حفظ</button>
-        </div>
-      </form>
-    </div>
-  `;
-  document.body.appendChild(modal);
-
-  const form = modal.querySelector("#scheduleForm");
-  const alertBox = modal.querySelector("#scheduleAlert");
-  const kindSel = modal.querySelector("#schKind");
-  const groupSel = modal.querySelector("#schGroup");
-  const saveBtn = modal.querySelector("#schSaveBtn");
-  const closeModal = () => modal.remove();
-  modal.querySelector("#schCancelBtn").onclick = closeModal;
-
-  // Cours are shared by all groups; TD/TP usually belong to one group.
-  const syncGroupWithKind = () => {
-    if (kindSel.value === "cours") {
-      groupSel.value = "all";
-      groupSel.disabled = true;
-    } else {
-      groupSel.disabled = false;
-      if (groupSel.value === "all" && !isEdit) groupSel.value = String(defaultGroup || 1);
-    }
-  };
-  kindSel.onchange = syncGroupWithKind;
-  syncGroupWithKind();
-
-  form.onsubmit = async (e) => {
-    e.preventDefault();
-    alertBox.style.display = "none";
-
-    const start = modal.querySelector("#schStart").value;
-    const end = modal.querySelector("#schEnd").value;
-    if (!start || !end || end <= start) {
-      alertBox.textContent = "وقت النهاية لازم يكون بعد وقت البداية.";
-      alertBox.style.display = "block";
+  const groupSelect = page.querySelector("#programGroupSelect");
+  const renderPrograms = () => {
+    const list = page.querySelector("#programFilesList");
+    if (!list) return;
+    if (!isOwnerAdmin && !ownGroup) {
+      list.innerHTML = `<div class="content-card"><p style="color:var(--muted);line-height:1.8;">لم يُعيّن فوجك الدراسي بعد. يرجى التواصل مع إدارة المنصة لتعيين فوجك.</p></div>`;
       return;
     }
+    const value = groupSelect?.value || selectedGroup;
+    const programs = state.filesCache
+      .filter(file => isScheduleProgramFile(file))
+      .filter(file => value === "all" ? true : isFileForGroup(file, Number(value)))
+      .sort((a,b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
 
-    const kind = kindSel.value;
-    const groupVal = groupSel.value;
-    const payload = {
-      day_of_week: parseInt(modal.querySelector("#schDay").value, 10),
-      start_time: start,
-      end_time: end,
-      subject_id: modal.querySelector("#schSubject").value,
-      kind,
-      room: modal.querySelector("#schRoom").value.trim() || null,
-      group_no: kind === "cours" || groupVal === "all" ? null : parseInt(groupVal, 10)
-    };
-
-    saveBtn.disabled = true;
-    saveBtn.textContent = "جاري الحفظ...";
-
-    try {
-      const { error } = isEdit
-        ? await supabase.from("schedule_entries").update(payload).eq("id", entry.id)
-        : await supabase.from("schedule_entries").insert(payload);
-      if (error) throw new Error(error.message);
-
-      await loadScheduleCache();
-      closeModal();
-      if (onSaved) onSaved();
-    } catch (err) {
-      const msg = String(err.message || err);
-      const hint = /schedule_entries|does not exist|schema cache/i.test(msg)
-        ? " — شغّل الملف migration_schedule.sql في Supabase (SQL Editor) أولا."
-        : "";
-      alertBox.textContent = `خطأ: ${msg}${hint}`;
-      alertBox.style.display = "block";
-      saveBtn.disabled = false;
-      saveBtn.textContent = "حفظ";
+    if (!programs.length) {
+      list.innerHTML = `<div style="text-align:center;padding:28px;color:var(--muted);">لم يُرفع البرنامج الدراسي لهذا الاختيار بعد.</div>`;
+      return;
     }
+    list.innerHTML = `
+      <div class="table-responsive">
+        <table class="data-table">
+          <thead><tr><th>البرنامج</th><th>الفوج</th><th>تاريخ الإضافة</th><th>Action</th></tr></thead>
+          <tbody>${programs.map(file => {
+            const group = getFileGroupNo(file);
+            const groupLabel = group ? `الفوج ${group}` : "جميع الأفواج";
+            return `<tr>
+              <td><strong>${escapeHtml(file.title || "البرنامج الدراسي")}</strong></td>
+              <td class="mono">${groupLabel}</td>
+              <td class="mono" style="font-size:12px;">${formatDate(file.created_at)}</td>
+              <td><a href="#/voir/${encodeURIComponent(file.id)}" class="btn-primary" style="display:inline-block;width:auto;text-decoration:none;padding:5px 12px;">معاينة PDF</a></td>
+            </tr>`;
+          }).join("")}</tbody>
+        </table>
+      </div>`;
   };
+
+  if (groupSelect) {
+    groupSelect.onchange = renderPrograms;
+  }
+  renderPrograms();
+
+  const form = page.querySelector("#programUploadForm");
+  if (form) {
+    form.onsubmit = async event => {
+      event.preventDefault();
+      const errorBox = page.querySelector("#programUploadError");
+      const successBox = page.querySelector("#programUploadSuccess");
+      const button = page.querySelector("#programUploadSubmit");
+      errorBox.style.display = "none";
+      successBox.style.display = "none";
+
+      const title = page.querySelector("#programTitle").value.trim();
+      const file = page.querySelector("#programPdfFile").files?.[0];
+      const targetValue = isOwnerAdmin ? page.querySelector("#programUploadGroup").value : String(ownGroup);
+      if (!canUpload || (isUploader && (!ownGroup || ownGroup < 1 || ownGroup > 10))) {
+        errorBox.textContent = "لا تملك صلاحية رفع البرنامج لهذا الفوج.";
+        errorBox.style.display = "block";
+        return;
+      }
+      if (!title) {
+        errorBox.textContent = "اكتب عنوان البرنامج أولًا.";
+        errorBox.style.display = "block";
+        return;
+      }
+      if (!file || (!file.name.toLowerCase().endsWith(".pdf") && file.type !== "application/pdf")) {
+        errorBox.textContent = "اختر ملفًا بصيغة PDF.";
+        errorBox.style.display = "block";
+        return;
+      }
+      if (file.size > 25 * 1024 * 1024) {
+        errorBox.textContent = "حجم الملف يتجاوز 25 ميغابايت.";
+        errorBox.style.display = "block";
+        return;
+      }
+
+      const targetGroup = targetValue === "all" ? null : Number(targetValue);
+      if (targetGroup !== null && (!Number.isInteger(targetGroup) || targetGroup < 1 || targetGroup > 10)) {
+        errorBox.textContent = "اختر فوجًا صحيحًا من 1 إلى 10.";
+        errorBox.style.display = "block";
+        return;
+      }
+
+      button.disabled = true;
+      button.textContent = "جارٍ رفع البرنامج...";
+      const folder = targetGroup === null ? "common" : `g${targetGroup}`;
+      const storagePath = `${folder}/schedule_${Date.now()}_${Math.random().toString(36).slice(2,8)}.pdf`;
+      let uploaded = false;
+      try {
+        const { error: storageError } = await supabase.storage
+          .from("course-files")
+          .upload(storagePath, file, { cacheControl: "3600", upsert: false, contentType: "application/pdf" });
+        if (storageError) throw new Error(storageError.message);
+        uploaded = true;
+
+        const { error: insertError } = await supabase.from("files").insert({
+          title,
+          semester: "S1",
+          subject: SCHEDULE_PDF_SUBJECT,
+          kind: "autre",
+          group_no: targetGroup,
+          path: storagePath
+        });
+        if (insertError) throw new Error(insertError.message);
+
+        successBox.textContent = "تم رفع البرنامج وحفظه بنجاح.";
+        successBox.style.display = "block";
+        form.reset();
+        await loadFilesCache();
+        renderTimetableView(page);
+      } catch (error) {
+        if (uploaded) {
+          const { error: cleanupError } = await supabase.storage.from("course-files").remove([storagePath]);
+          if (cleanupError) console.warn("Could not clean up failed schedule PDF upload:", cleanupError.message);
+        }
+        errorBox.textContent = `تعذر رفع البرنامج: ${error.message || "حدث خطأ غير متوقع"}`;
+        errorBox.style.display = "block";
+      } finally {
+        const currentButton = page.querySelector("#programUploadSubmit");
+        if (currentButton) {
+          currentButton.disabled = false;
+          currentButton.textContent = "إضافة البرنامج PDF";
+        }
+      }
+    };
+  }
 }
 
 // 18. PAGE: VIEW-ONLY PDF VIEWER (#/voir/:id)
@@ -2179,12 +2121,156 @@ async function renderPdfPage(num) {
   }
 }
 
+// Owner-only directory. Suspension actions are performed by a Supabase Edge Function;
+// the service-role key is never placed in browser code.
+async function renderOwnerUsersView(page) {
+  if (state.role !== "owner") {
+    renderAccessDenied(page);
+    return;
+  }
+  page.innerHTML = `
+    <div class="page-banner">
+      <h2>لوحة المالك — إدارة المستخدمين</h2>
+      <p>قائمة خاصة بالمالك تضم الطلاب والمشرفين ورؤساء الأقسام، مصنفة حسب الفوج والدور.</p>
+    </div>
+    <div class="content-card">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:16px;">
+        <div class="form-group" style="margin:0;">
+          <label class="form-label" for="ownerUserGroupFilter">الفوج</label>
+          <select id="ownerUserGroupFilter" class="form-control mono">
+            <option value="all">جميع الأفواج</option>
+            ${[1,2,3,4,5,6,7,8,9,10].map(g=>`<option value="${g}">الفوج ${g}</option>`).join("")}
+          </select>
+        </div>
+        <div class="form-group" style="margin:0;">
+          <label class="form-label" for="ownerUserRoleFilter">نوع الحساب</label>
+          <select id="ownerUserRoleFilter" class="form-control">
+            <option value="all">جميع الأدوار</option>
+            <option value="student">الطلاب</option>
+            <option value="uploader">رؤساء الأقسام</option>
+            <option value="admin">المشرفون</option>
+            <option value="owner">المالك</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin:0;">
+          <label class="form-label" for="ownerUserSearch">بحث بالبريد الإلكتروني</label>
+          <input id="ownerUserSearch" class="form-control" type="search" placeholder="اكتب البريد الإلكتروني">
+        </div>
+      </div>
+      <div id="ownerUsersNotice" role="status" class="auth-success-box"></div>
+      <div id="ownerUsersError" role="alert" class="auth-error-box"></div>
+      <div id="ownerUsersTable"><p style="padding:18px;color:var(--muted);">جارٍ تحميل قائمة المستخدمين...</p></div>
+    </div>
+  `;
+
+  const groupFilter = page.querySelector("#ownerUserGroupFilter");
+  const roleFilter = page.querySelector("#ownerUserRoleFilter");
+  const searchInput = page.querySelector("#ownerUserSearch");
+  const table = page.querySelector("#ownerUsersTable");
+  const errorBox = page.querySelector("#ownerUsersError");
+  const noticeBox = page.querySelector("#ownerUsersNotice");
+  let users = [];
+  const roleLabels = { owner: "المالك", admin: "مشرف عام", uploader: "رئيس قسم", student: "طالب" };
+
+  function renderRows() {
+    const group = groupFilter.value;
+    const role = roleFilter.value;
+    const query = searchInput.value.trim().toLowerCase();
+    const filtered = users.filter(user => {
+      const userRole = listedUserRole(user);
+      const userGroup = listedUserGroup(user);
+      return (group === "all" || String(userGroup || "") === group)
+        && (role === "all" || userRole === role)
+        && String(user.email || "").toLowerCase().includes(query);
+    });
+
+    if (!filtered.length) {
+      table.innerHTML = `<p style="padding:20px;text-align:center;color:var(--muted);">لا توجد حسابات مطابقة لهذه الاختيارات.</p>`;
+      return;
+    }
+    table.innerHTML = `
+      <div class="table-responsive">
+        <table class="data-table">
+          <thead><tr><th>البريد الإلكتروني</th><th>الدور</th><th>الفوج</th><th>الحالة</th><th>الإجراء</th></tr></thead>
+          <tbody>${filtered.map(user => {
+            const userId = listedUserId(user);
+            const userRole = listedUserRole(user);
+            const userGroup = listedUserGroup(user);
+            const suspended = user.is_suspended === true || user.suspended === true;
+            const isProtectedOwner = userRole === "owner" || String(user.email || "").toLowerCase() === "locoviber16@gmail.com";
+            return `<tr>
+              <td class="mono">${escapeHtml(user.email || "—")}</td>
+              <td>${roleLabels[userRole] || escapeHtml(userRole)}</td>
+              <td class="mono">${userGroup ? `G${userGroup}` : (userRole === "owner" || userRole === "admin" ? "كل الأفواج" : "غير محدد")}</td>
+              <td><span style="font-weight:600;color:${suspended ? "var(--danger)" : "var(--success,#28734a)"};">${suspended ? "موقوف" : "نشط"}</span></td>
+              <td>${isProtectedOwner ? `<span style="color:var(--muted);">محمي</span>` : `<button type="button" class="${suspended ? "btn-primary" : "btn-danger"} owner-user-access-btn" data-user-id="${escapeHtml(userId || "")}" data-action="${suspended ? "restore" : "suspend"}" data-email="${escapeHtml(user.email || "")}" ${!userId ? "disabled" : ""}>${suspended ? "إعادة التفعيل" : "إيقاف الحساب"}</button>`}</td>
+            </tr>`;
+          }).join("")}</tbody>
+        </table>
+      </div>
+    `;
+
+    table.querySelectorAll(".owner-user-access-btn").forEach(button => {
+      button.onclick = async () => {
+        const userId = button.dataset.userId;
+        const action = button.dataset.action;
+        const email = button.dataset.email;
+        const question = action === "suspend"
+          ? `هل تريد إيقاف حساب ${email}؟ يمكن إعادة تفعيله لاحقًا.`
+          : `هل تريد إعادة تفعيل حساب ${email}؟`;
+        if (!confirm(question)) return;
+
+        errorBox.style.display = "none";
+        noticeBox.style.display = "none";
+        button.disabled = true;
+        button.textContent = action === "suspend" ? "جارٍ الإيقاف..." : "جارٍ التفعيل...";
+        try {
+          const { data, error } = await supabase.functions.invoke("manage-user-access", {
+            body: { userId, action }
+          });
+          if (error) throw new Error(error.message || "تعذر الاتصال بخدمة إدارة الحسابات.");
+          if (data?.error) throw new Error(data.error);
+          noticeBox.textContent = action === "suspend"
+            ? `تم إيقاف حساب ${email}. قد تحتاج الجلسة الحالية إلى انتهاء صلاحية رمز الدخول حتى يتوقف الوصول تمامًا.`
+            : `تمت إعادة تفعيل حساب ${email}.`;
+          noticeBox.style.display = "block";
+          await loadUsers();
+        } catch (error) {
+          errorBox.textContent = `تعذر تنفيذ العملية: ${error.message || "خطأ غير معروف"}. تأكد من نشر Edge Function باسم manage-user-access وتطبيق migration_security_v10.sql.`;
+          errorBox.style.display = "block";
+          button.disabled = false;
+          button.textContent = action === "suspend" ? "إيقاف الحساب" : "إعادة التفعيل";
+        }
+      };
+    });
+  }
+
+  async function loadUsers() {
+    table.innerHTML = `<p style="padding:18px;color:var(--muted);">جارٍ تحميل قائمة المستخدمين...</p>`;
+    try {
+      const { data, error } = await supabase.rpc("owner_list_users");
+      if (error) throw new Error(error.message);
+      users = Array.isArray(data) ? data : [];
+      renderRows();
+    } catch (error) {
+      table.innerHTML = "";
+      errorBox.textContent = `تعذر تحميل المستخدمين: ${error.message || "خطأ غير معروف"}. تأكد من تطبيق migration_security_v10.sql في مشروع Supabase الصحيح.`;
+      errorBox.style.display = "block";
+    }
+  }
+
+  groupFilter.onchange = renderRows;
+  roleFilter.onchange = renderRows;
+  searchInput.oninput = renderRows;
+  await loadUsers();
+}
+
 // 19. PAGE: MINIMAL ADMIN FOR OWNER ONLY (#/admin)
 async function renderAdminView(page) {
   page.innerHTML = `
     <div class="page-banner">
       <h2>الإدارة</h2>
-      <p>${state.role === "owner" ? "إدارة وتعيين المشرفين ورؤساء الأقسام." : "إدارة وتعيين رؤساء الأقسام للأفواج الدراسية."}</p>
+      <p>${state.role === "owner" ? "إدارة المستخدمين والصلاحيات لجميع الأفواج. المالك وحده يدير المشرفين العامين." : "مراجعة طلبات تغيير الفوج، وإضافة رؤساء الأقسام وإدارتهم. لا يمكن للمشرف إضافة مشرف عام."}</p>
     </div>
 
     <!-- Student group-change requests: visible only to owner/admin through the protected admin route -->
@@ -2198,7 +2284,7 @@ async function renderAdminView(page) {
     <!-- Card 0: Admins (owner only) -->
     <div class="content-card">
       <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 6px;">المشرفون</h3>
-      <p style="font-size: 12px; color: var(--muted); margin-bottom: 12px;">المشرف يضيف ويعدل الأساتذة والجدول الزمني والملفات، ويعين رؤساء الأقسام. يجب أن يكون الحساب مسجلا مسبقا.</p>
+      <p style="font-size: 12px; color: var(--muted); margin-bottom: 12px;">إضافة المشرفين العامين وإلغاءهم صلاحية حصرية للمالك. أما المشرف فيستطيع تعيين رؤساء الأقسام وإدارتهم دون ترقية أي مستخدم إلى مشرف عام.</p>
       <div id="addAdminAlertError" class="auth-error-box"></div>
       <div id="addAdminAlertSuccess" class="auth-success-box"></div>
       <form id="addAdminForm" style="display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; margin-bottom: 16px;">
@@ -2214,8 +2300,8 @@ async function renderAdminView(page) {
     </div>
     ` : ""}
 
-    <!-- Card 1: Add Section Head -->
-    <div class="content-card">
+    <!-- Card 1: Add Section Head (owner and admin; admins cannot manage admins) -->
+    <div class="content-card" style="${state.role === "owner" || state.role === "admin" ? "" : "display:none;"}">
       <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 12px;">إضافة رئيس قسم</h3>
       <div id="addHeadAlertError" class="auth-error-box"></div>
       <div id="addHeadAlertSuccess" class="auth-success-box"></div>
@@ -2239,8 +2325,8 @@ async function renderAdminView(page) {
       </form>
     </div>
 
-    <!-- Card 2: Section Heads Table -->
-    <div class="content-card">
+    <!-- Card 2: Section Heads Table (owner and admin) -->
+    <div class="content-card" style="${state.role === "owner" || state.role === "admin" ? "" : "display:none;"}">
       <h3 style="font-size: 16px; font-weight: 600; color: var(--brown-dark); margin-bottom: 8px;">رؤساء الأقسام</h3>
       <p style="font-size: 12px; color: var(--muted); margin-bottom: 14px;">تغيير الدور يتطبق عند تسجيل الدخول القادم للمستخدم.</p>
       
@@ -2262,7 +2348,7 @@ async function renderAdminView(page) {
         adminRequestsWrapper.innerHTML = `<p style="padding:16px;color:var(--muted);">لا توجد طلبات جديدة قيد المراجعة.</p>`;
         return;
       }
-      adminRequestsWrapper.innerHTML = `<div class="table-responsive"><table class="data-table"><thead><tr><th>بريد الطالب</th><th>الفوج الحالي</th><th>الفوج المطلوب</th><th>السبب</th><th>الإجراء</th></tr></thead><tbody>${data.map(r => `<tr><td class="mono">${escapeHtml(r.student_email || "—")}</td><td class="mono">${r.current_group ? `G${r.current_group}` : "غير محدد"}</td><td class="mono">G${r.requested_group}</td><td style="min-width:180px;white-space:normal;">${escapeHtml(r.reason)}</td><td><div style="display:flex;gap:6px;flex-wrap:wrap;"><button type="button" class="btn-primary group-request-approve" data-id="${r.id}" data-group="${r.requested_group}" style="width:auto;padding:6px 10px;">موافقة</button><button type="button" class="btn-danger group-request-reject" data-id="${r.id}" style="width:auto;padding:6px 10px;">رفض</button></div></td></tr>`).join("")}</tbody></table></div>`;
+      adminRequestsWrapper.innerHTML = `<div class="table-responsive"><table class="data-table"><thead><tr><th>بريد الطالب</th><th>الفوج الحالي</th><th>الفوج المطلوب</th><th>السبب</th><th>الAction</th></tr></thead><tbody>${data.map(r => `<tr><td class="mono">${escapeHtml(r.student_email || "—")}</td><td class="mono">${r.current_group ? `G${r.current_group}` : "غير محدد"}</td><td class="mono">G${r.requested_group}</td><td style="min-width:180px;white-space:normal;">${escapeHtml(r.reason)}</td><td><div style="display:flex;gap:6px;flex-wrap:wrap;"><button type="button" class="btn-primary group-request-approve" data-id="${r.id}" data-group="${r.requested_group}" style="width:auto;padding:6px 10px;">موافقة</button><button type="button" class="btn-danger group-request-reject" data-id="${r.id}" style="width:auto;padding:6px 10px;">رفض</button></div></td></tr>`).join("")}</tbody></table></div>`;
       adminRequestsWrapper.querySelectorAll(".group-request-approve").forEach(btn => {
         btn.onclick = async () => {
           const id = Number(btn.dataset.id);
@@ -2303,6 +2389,11 @@ async function renderAdminView(page) {
 
   addForm.onsubmit = async (e) => {
     e.preventDefault();
+    if (state.role !== "owner" && state.role !== "admin") {
+      alertErr.textContent = "تعيين رؤساء الأقسام متاح للمالك والمشرف فقط.";
+      alertErr.style.display = "block";
+      return;
+    }
     alertErr.style.display = "none";
     alertSucc.style.display = "none";
 
@@ -2315,8 +2406,8 @@ async function renderAdminView(page) {
     addBtn.textContent = "جاري الفحص...";
 
     try {
-      // 1. Call rpc("owner_list_users")
-      const { data: users, error: listErr } = await supabase.rpc("owner_list_users");
+      // 1. Find the registered account using the restricted owner/admin head-management RPC.
+      const { data: users, error: listErr } = await supabase.rpc("admin_list_users_for_heads");
       if (listErr) throw new Error(listErr.message);
 
       // 2. Find user by case-insensitive email
@@ -2330,8 +2421,15 @@ async function renderAdminView(page) {
         return;
       }
 
-      if (matchedUser.role === "owner") {
+      if (listedUserRole(matchedUser) === "owner") {
         alertErr.textContent = "لا يمكن تعيين المالك كرئيس قسم.";
+        alertErr.style.display = "block";
+        addBtn.disabled = false;
+        addBtn.textContent = "إضافة";
+        return;
+      }
+      if (state.role === "admin" && listedUserRole(matchedUser) === "admin") {
+        alertErr.textContent = "لا يستطيع المشرف العام تغيير رتبة مشرف عام آخر.";
         alertErr.style.display = "block";
         addBtn.disabled = false;
         addBtn.textContent = "إضافة";
@@ -2342,7 +2440,7 @@ async function renderAdminView(page) {
 
       // 3. Call owner_set_uploader
       const { error: setErr } = await supabase.rpc("owner_set_uploader", {
-        p_user: matchedUser.id,
+        p_user: listedUserId(matchedUser),
         p_group: targetGroup
       });
 
@@ -2362,18 +2460,19 @@ async function renderAdminView(page) {
   };
 
   async function loadRealHeadsTable() {
+    if (state.role !== "owner" && state.role !== "admin") return;
     const wrapper = document.getElementById("headsListTableWrapper");
     if (!wrapper) return;
 
     try {
-      const { data: users, error } = await supabase.rpc("owner_list_users");
+      const { data: users, error } = await supabase.rpc("admin_list_users_for_heads");
       if (error) {
         wrapper.innerHTML = `<div class="auth-error-box" style="display:block;">خطأ: ${escapeHtml(error.message)}</div>`;
         return;
       }
 
       // Filter users whose user_role = "uploader"
-      const uploaderHeads = (users || []).filter(u => u.role === "uploader");
+      const uploaderHeads = (users || []).filter(u => listedUserRole(u) === "uploader");
 
       if (uploaderHeads.length === 0) {
         wrapper.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--muted); font-size: 14px;">ما عينتش حتى رئيس قسم بعد</div>`;
@@ -2387,16 +2486,16 @@ async function renderAdminView(page) {
               <tr>
                 <th>البريد الإلكتروني</th>
                 <th>الفوج</th>
-                <th>إجراء</th>
+                <th>Action</th>
               </tr>
             </thead>
             <tbody>
               ${uploaderHeads.map(h => `
                 <tr>
                   <td class="mono">${escapeHtml(h.email)}</td>
-                  <td class="mono">G${h.group_no || "—"}</td>
+                  <td class="mono">G${listedUserGroup(h) || "—"}</td>
                   <td>
-                    <button type="button" class="btn-danger remove-head-row-btn" data-uid="${h.id}" data-email="${escapeHtml(h.email)}">
+                    <button type="button" class="btn-danger remove-head-row-btn" data-uid="${listedUserId(h)}" data-email="${escapeHtml(h.email)}">
                       إلغاء
                     </button>
                   </td>
@@ -2450,7 +2549,7 @@ async function renderAdminView(page) {
         wrapper.innerHTML = `<div class="auth-error-box" style="display:block;">خطأ: ${escapeHtml(error.message)}</div>`;
         return;
       }
-      const admins = (users || []).filter(u => u.role === "admin");
+      const admins = (users || []).filter(u => listedUserRole(u) === "admin");
       if (admins.length === 0) {
         wrapper.innerHTML = `<div style="text-align: center; padding: 18px; color: var(--muted); font-size: 14px;">لا يوجد مشرفون بعد</div>`;
         return;
@@ -2458,12 +2557,12 @@ async function renderAdminView(page) {
       wrapper.innerHTML = `
         <div class="table-responsive">
           <table class="data-table">
-            <thead><tr><th>البريد الإلكتروني</th><th>إجراء</th></tr></thead>
+            <thead><tr><th>البريد الإلكتروني</th><th>Action</th></tr></thead>
             <tbody>
               ${admins.map(a => `
                 <tr>
                   <td class="mono">${escapeHtml(a.email)}</td>
-                  <td><button type="button" class="btn-danger remove-admin-btn" data-uid="${a.id}" data-email="${escapeHtml(a.email)}">إلغاء</button></td>
+                  <td><button type="button" class="btn-danger remove-admin-btn" data-uid="${listedUserId(a)}" data-email="${escapeHtml(a.email)}">إلغاء</button></td>
                 </tr>
               `).join("")}
             </tbody>
@@ -2503,12 +2602,12 @@ async function renderAdminView(page) {
           adminErr.style.display = "block";
           return;
         }
-        if (matched.role === "owner") {
+        if (listedUserRole(matched) === "owner") {
           adminErr.textContent = "هذا الحساب هو المالك بالفعل.";
           adminErr.style.display = "block";
           return;
         }
-        const { error: setErr } = await supabase.rpc("owner_set_admin", { p_user: matched.id });
+        const { error: setErr } = await supabase.rpc("owner_set_admin", { p_user: listedUserId(matched) });
         if (setErr) throw new Error(setErr.message);
 
         adminSucc.textContent = `تم تعيين ${matched.email} مشرفا بنجاح. التغيير يتطبق عند تسجيل دخوله القادم.`;
@@ -2558,7 +2657,7 @@ async function renderUploadView(page) {
           <div class="form-group">
             <label class="form-label" for="uploadSubject">المقياس *</label>
             <select id="uploadSubject" class="form-control" required>
-              ${SUBJECT_DEFINITIONS.map(s => `<option value="${s.id}">${escapeHtml(s.nameAr)} (${s.id})</option>`).join("")}
+              ${SUBJECT_DEFINITIONS.map(s => `<option value="${s.id}">${escapeHtml((s.nameEn || s.nameFr || s.nameAr))} (${s.id})</option>`).join("")}
               <option value="Autre">Autre (أخرى)</option>
             </select>
           </div>
@@ -2771,13 +2870,13 @@ async function renderUploadView(page) {
     const wrapper = document.getElementById("uploadFilesTableWrapper");
     if (!wrapper) return;
 
-    let files = isStaff ? [...state.filesCache] : state.filesCache.filter(f => f.group_no === upGroup);
+    let files = isStaff ? [...state.filesCache] : state.filesCache.filter(f => isFileForGroup(f, upGroup));
 
     if (isStaff) {
       const gFilter = document.getElementById("filterUploadGroup")?.value;
       const kFilter = document.getElementById("filterUploadKind")?.value;
       if (gFilter && gFilter !== "all") {
-        files = files.filter(f => String(f.group_no) === gFilter);
+        files = files.filter(f => isFileForGroup(f, Number(gFilter)));
       }
       if (kFilter && kFilter !== "all") {
         files = files.filter(f => f.kind === kFilter);
@@ -2799,14 +2898,14 @@ async function renderUploadView(page) {
               <th>النوع</th>
               <th>الفوج</th>
               <th>التاريخ</th>
-              <th>إجراءات</th>
+              <th>Actionات</th>
             </tr>
           </thead>
           <tbody>
             ${files.map(f => `
               <tr>
                 <td><strong>${escapeHtml(f.title)}</strong></td>
-                <td>${escapeHtml(getSubjectObj(normalizeSubjectId(f.subject)).nameFr || f.subject)}</td>
+                <td>${escapeHtml(getSubjectObj(normalizeSubjectId(f.subject)).nameEn || getSubjectObj(normalizeSubjectId(f.subject)).nameFr || f.subject)}</td>
                 <td><span class="badge-tag">${escapeHtml(f.kind)}</span></td>
                 <td class="mono">${f.group_no ? `G${f.group_no}` : "كل الأفواج"}</td>
                 <td class="mono" style="font-size: 12px;">${formatDate(f.created_at)}</td>
@@ -2864,6 +2963,7 @@ async function renderUploadView(page) {
 
 // 21. PAGE: ACCOUNT (#/compte)
 function renderAccountView(page) {
+  const isOwner = state.role === "owner";
   const sg = state.studentGroup;
   const groupOptions = [1,2,3,4,5,6,7,8,9,10].map(g => `<option value="${g}">G${g}</option>`).join("");
   page.innerHTML = `
@@ -2872,116 +2972,118 @@ function renderAccountView(page) {
       <p>تفاصيل الحساب الدراسي والصلاحيات المسجلة.</p>
     </div>
 
-    <div class="content-card" style="max-width: 720px;">
-      <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 24px;">
-        <div class="user-avatar-circle" style="width: 56px; height: 56px; font-size: 22px;">
+    <div class="content-card" style="max-width:720px;">
+      <div style="display:flex;align-items:center;gap:16px;margin-bottom:24px;">
+        <div class="user-avatar-circle" style="width:56px;height:56px;font-size:22px;">
           ${escapeHtml(state.user.email?.[0]?.toUpperCase() || "U")}
         </div>
         <div>
-          <h3 style="font-size: 18px; font-weight: 600; color: var(--brown-dark);" class="mono">${escapeHtml(state.user.email)}</h3>
-          <span class="role-badge ${state.role}" style="display: inline-block; margin-top: 4px;">${getRoleBadgeText(state.role, state.uploaderGroup)}</span>
+          <h3 style="font-size:18px;font-weight:600;color:var(--brown-dark);" class="mono">${escapeHtml(state.user.email)}</h3>
+          <span class="role-badge ${state.role}" style="display:inline-block;margin-top:4px;">${getRoleBadgeText(state.role,state.uploaderGroup)}</span>
         </div>
       </div>
 
-      <div class="form-group">
-        <label class="form-label">فوجك الدراسي المسجل:</label>
-        <div style="font-weight: 600; font-size: 16px; color: var(--brown-dark);" class="mono">${sg ? `الفوج G${sg}` : "غير محدد — يمكنك إرسال طلب إلى الإدارة لتعيين فوجك."}</div>
-        <small style="color: var(--muted); font-size: 12px;">لا يتغير الفوج إلا بعد موافقة الإدارة.</small>
-      </div>
-
-      <hr style="border: 0; border-top: 1px solid var(--line); margin: 24px 0;">
-
-      <section aria-labelledby="groupRequestTitle">
-        <h3 id="groupRequestTitle" style="font-size:17px;font-weight:700;color:var(--brown-dark);margin-bottom:8px;">طلب تغيير / تعيين الفوج</h3>
-        <p style="font-size:13px;color:var(--muted);margin-bottom:8px;">اختر الفوج الذي تدرس فيه فعلًا من القائمة ثم أرسل الطلب. لن يتغير فوجك مباشرة؛ المالك أو المشرف يراجع الطلب ويوافق عليه أولًا حتى لا يستطيع أي شخص تغيير صلاحياته بنفسه.</p>
-        <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">بعد الموافقة، حدّث الصفحة أو سجّل الخروج ثم الدخول مجددًا حتى تظهر ملفات فوجك الصحيح.</p>
-        <div id="groupRequestAlert" role="status" class="auth-success-box"></div>
-        <div id="groupRequestError" role="alert" class="auth-error-box"></div>
-        <form id="groupChangeRequestForm" style="display:grid;gap:12px;">
-          <div class="form-group" style="margin-bottom:0;">
-            <label class="form-label" for="requestedGroupSelect">الفوج المطلوب *</label>
-            <select id="requestedGroupSelect" class="form-control mono" required>${groupOptions}</select>
-          </div>
-          <div class="form-group" style="margin-bottom:0;">
-            <label class="form-label" for="groupRequestReason">سبب الطلب *</label>
-            <textarea id="groupRequestReason" class="form-control" rows="3" maxlength="1000" required placeholder="مثال: فوجي غير ظاهر في حسابي، وأرغب في تعيين الفوج الصحيح."></textarea>
-          </div>
-          <button type="submit" class="btn-primary" id="sendGroupRequestBtn" style="width:auto;justify-self:start;padding:10px 18px;">إرسال الطلب إلى الإدارة</button>
-        </form>
-        <div style="margin-top:22px;">
-          <h4 style="font-size:14px;font-weight:700;color:var(--brown-dark);margin-bottom:10px;">طلباتي السابقة</h4>
-          <div id="myGroupRequests"><p style="color:var(--muted);font-size:13px;">جاري تحميل الطلبات...</p></div>
+      ${isOwner ? `
+        <div style="border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--cream,#fbf7f0);">
+          <h3 style="font-size:18px;font-weight:700;color:var(--brown-dark);margin-bottom:8px;">مالك منصة info cc 404</h3>
+          <p style="color:var(--muted);line-height:1.9;margin:0;">هذا الحساب هو حساب مالك المنصة. يمكنك إدارة جميع الأفواج من 1 إلى 10، وإدارة المشرفين ورؤساء الأقسام والطلاب من لوحة المالك.</p>
+          <a href="#/admin" class="btn-primary" style="display:inline-block;width:auto;text-decoration:none;padding:9px 16px;margin-top:12px;">فتح لوحة الإدارة</a>
         </div>
-      </section>
+      ` : `
+        <div class="form-group">
+          <label class="form-label">فوجك الدراسي المسجل:</label>
+          <div style="font-weight:600;font-size:16px;color:var(--brown-dark);" class="mono">${sg ? `الفوج G${sg}` : "غير محدد — يمكنك إرسال طلب إلى الإدارة لتعيين فوجك."}</div>
+          <small style="color:var(--muted);font-size:12px;">لا يتغير الفوج إلا بعد موافقة الإدارة.</small>
+        </div>
 
-      <hr style="border: 0; border-top: 1px solid var(--line); margin: 24px 0;">
-      <button type="button" class="btn-danger" id="accountLogoutBtn" style="padding: 10px 20px; font-size: 14px;">تسجيل الخروج من الحساب</button>
+        <hr style="border:0;border-top:1px solid var(--line);margin:24px 0;">
+        <section aria-labelledby="groupRequestTitle">
+          <h3 id="groupRequestTitle" style="font-size:17px;font-weight:700;color:var(--brown-dark);margin-bottom:8px;">طلب تغيير / تعيين الفوج</h3>
+          <p style="font-size:13px;color:var(--muted);margin-bottom:8px;">اختر الفوج الذي تدرس فيه فعلًا من القائمة ثم أرسل الطلب. لن يتغير فوجك مباشرة؛ المالك يراجع الطلب أو المشرف المفوض يراجعه.</p>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">بعد الموافقة، حدّث الصفحة أو سجّل الخروج ثم الدخول مجددًا حتى تظهر ملفات فوجك الصحيح.</p>
+          <div id="groupRequestAlert" role="status" class="auth-success-box"></div>
+          <div id="groupRequestError" role="alert" class="auth-error-box"></div>
+          <form id="groupChangeRequestForm" style="display:grid;gap:12px;">
+            <div class="form-group" style="margin-bottom:0;">
+              <label class="form-label" for="requestedGroupSelect">الفوج المطلوب *</label>
+              <select id="requestedGroupSelect" class="form-control mono" required>${groupOptions}</select>
+            </div>
+            <div class="form-group" style="margin-bottom:0;">
+              <label class="form-label" for="groupRequestReason">سبب الطلب *</label>
+              <textarea id="groupRequestReason" class="form-control" rows="3" maxlength="1000" required placeholder="مثال: فوجي غير ظاهر في حسابي، وأرغب في تعيين الفوج الصحيح."></textarea>
+            </div>
+            <button type="submit" class="btn-primary" id="sendGroupRequestBtn" style="width:auto;justify-self:start;padding:10px 18px;">إرسال الطلب إلى الإدارة</button>
+          </form>
+          <div style="margin-top:22px;">
+            <h4 style="font-size:14px;font-weight:700;color:var(--brown-dark);margin-bottom:10px;">طلباتي السابقة</h4>
+            <div id="myGroupRequests"><p style="color:var(--muted);font-size:13px;">جاري تحميل الطلبات...</p></div>
+          </div>
+        </section>
+      `}
+
+      <hr style="border:0;border-top:1px solid var(--line);margin:24px 0;">
+      <button type="button" class="btn-danger" id="accountLogoutBtn" style="padding:10px 20px;font-size:14px;">تسجيل الخروج من الحساب</button>
     </div>
   `;
 
   const requestForm = document.getElementById("groupChangeRequestForm");
-  const requestAlert = document.getElementById("groupRequestAlert");
-  const requestError = document.getElementById("groupRequestError");
-  const requestButton = document.getElementById("sendGroupRequestBtn");
-  const requestsContainer = document.getElementById("myGroupRequests");
-  const statusLabels = { pending: "قيد المراجعة", approved: "تمت الموافقة", rejected: "مرفوض" };
-  const statusColors = { pending: "#8a6d3b", approved: "#28734a", rejected: "#a33b32" };
+  if (requestForm) {
+    const requestAlert = document.getElementById("groupRequestAlert");
+    const requestError = document.getElementById("groupRequestError");
+    const requestButton = document.getElementById("sendGroupRequestBtn");
+    const requestsContainer = document.getElementById("myGroupRequests");
 
-  async function loadMyGroupRequests() {
-    try {
-      const { data, error } = await supabase.from("group_change_requests")
-        .select("id,current_group,requested_group,reason,status,admin_note,created_at,reviewed_at")
-        .order("created_at", { ascending: false }).limit(20);
-      if (error) throw error;
-      if (!data || data.length === 0) {
-        requestsContainer.innerHTML = `<p style="color:var(--muted);font-size:13px;">لا توجد طلبات سابقة.</p>`;
-        return;
+    async function loadMyGroupRequests() {
+      try {
+        const { data, error } = await supabase.from("group_change_requests")
+          .select("id,current_group,requested_group,reason,status,admin_note,created_at,reviewed_at")
+          .order("created_at", { ascending: false }).limit(20);
+        if (error) throw error;
+        if (!data || data.length === 0) {
+          requestsContainer.innerHTML = `<p style="color:var(--muted);font-size:13px;">لا توجد طلبات سابقة.</p>`;
+          return;
+        }
+        const statusLabels = { pending: "قيد المراجعة", approved: "تمت الموافقة", rejected: "مرفوض" };
+        const statusColors = { pending: "#8a6d3b", approved: "#28734a", rejected: "#a33b32" };
+        requestsContainer.innerHTML = `<div class="table-responsive"><table class="data-table"><thead><tr><th>الفوج الحالي</th><th>الفوج المطلوب</th><th>الحالة</th><th>تاريخ الطلب</th><th>ملاحظة الإدارة</th></tr></thead><tbody>${data.map(r => `<tr><td class="mono">${r.current_group ? `G${r.current_group}` : "غير محدد"}</td><td class="mono">G${r.requested_group}</td><td><span style="color:${statusColors[r.status] || "inherit"};font-weight:600;">${statusLabels[r.status] || escapeHtml(r.status)}</span></td><td class="mono" style="font-size:12px;">${formatDate(r.created_at)}</td><td>${escapeHtml(r.admin_note || "—")}</td></tr>`).join("")}</tbody></table></div>`;
+      } catch (err) {
+        console.warn("Could not load group change requests:", err);
+        requestsContainer.innerHTML = `<p style="color:var(--muted);font-size:13px;">تعذر تحميل الطلبات. تحقق من إعدادات طلبات تغيير الفوج. التفاصيل: ${escapeHtml(err.message || "خطأ غير معروف")}</p>`;
       }
-      requestsContainer.innerHTML = `<div class="table-responsive"><table class="data-table"><thead><tr><th>الفوج الحالي</th><th>الفوج المطلوب</th><th>الحالة</th><th>تاريخ الطلب</th><th>ملاحظة الإدارة</th></tr></thead><tbody>${data.map(r => `<tr><td class="mono">${r.current_group ? `G${r.current_group}` : "غير محدد"}</td><td class="mono">G${r.requested_group}</td><td><span style="font-weight:700;color:${statusColors[r.status] || 'var(--muted)'}">${statusLabels[r.status] || escapeHtml(r.status)}</span></td><td>${r.created_at ? new Date(r.created_at).toLocaleDateString() : "—"}</td><td>${escapeHtml(r.admin_note || "—")}</td></tr>`).join("")}</tbody></table></div>`;
-    } catch (err) {
-      console.warn("Could not load group change requests:", err);
-      requestsContainer.innerHTML = `<p style="color:var(--muted);font-size:13px;">تعذر تحميل الطلبات. إذا لم تُطبّق ترقية قاعدة البيانات، اطلب من الإدارة تطبيق ملف migration_group_change_requests.sql.</p>`;
     }
+
+    requestForm.onsubmit = async event => {
+      event.preventDefault();
+      requestAlert.style.display = "none";
+      requestError.style.display = "none";
+      requestButton.disabled = true;
+      requestButton.textContent = "جارٍ إرسال الطلب...";
+      try {
+        const requestedGroup = parseInt(document.getElementById("requestedGroupSelect").value, 10);
+        const reason = document.getElementById("groupRequestReason").value.trim();
+        if (!Number.isInteger(requestedGroup) || requestedGroup < 1 || requestedGroup > 10) throw new Error("اختر فوجًا صحيحًا من G1 إلى G10.");
+        if (reason.length < 5) throw new Error("يرجى كتابة سبب واضح للطلب (5 أحرف على الأقل).");
+        const { error } = await supabase.from("group_change_requests").insert({ requested_group: requestedGroup, reason });
+        if (error) {
+          if (error.code === "23505") throw new Error("لديك طلب قيد المراجعة بالفعل. انتظر رد الإدارة قبل إرسال طلب آخر.");
+          if (error.code === "42P01" || error.code === "PGRST205") throw new Error("ميزة الطلبات تحتاج إلى تطبيق ملف migration_group_change_requests.sql في Supabase أولًا.");
+          throw new Error(error.message);
+        }
+        requestAlert.textContent = "تم إرسال طلبك إلى الإدارة بنجاح. لن يتغير فوجك إلا بعد الموافقة.";
+        requestAlert.style.display = "block";
+        document.getElementById("groupRequestReason").value = "";
+        await loadMyGroupRequests();
+      } catch (err) {
+        requestError.textContent = err.message || "تعذر إرسال الطلب. حاول لاحقًا.";
+        requestError.style.display = "block";
+      } finally {
+        requestButton.disabled = false;
+        requestButton.textContent = "إرسال الطلب إلى الإدارة";
+      }
+    };
+    loadMyGroupRequests();
   }
 
-  requestForm.onsubmit = async (e) => {
-    e.preventDefault();
-    requestAlert.style.display = "none";
-    requestError.style.display = "none";
-    requestButton.disabled = true;
-    requestButton.textContent = "جارٍ إرسال الطلب...";
-    try {
-      const requestedGroup = parseInt(document.getElementById("requestedGroupSelect").value, 10);
-      const reason = document.getElementById("groupRequestReason").value.trim();
-      if (!Number.isInteger(requestedGroup) || requestedGroup < 1 || requestedGroup > 10) throw new Error("اختر فوجًا صحيحًا من G1 إلى G10.");
-      if (reason.length < 5) throw new Error("يرجى كتابة سبب واضح للطلب (5 أحرف على الأقل).");
-      const { error } = await supabase.from("group_change_requests").insert({ requested_group: requestedGroup, reason });
-      if (error) {
-        if (error.code === "23505") throw new Error("لديك طلب قيد المراجعة بالفعل. انتظر رد الإدارة قبل إرسال طلب آخر.");
-        if (error.code === "42P01" || error.code === "PGRST205") {
-  throw new Error(
-    `تعذر العثور على الجدول في قاعدة البيانات أو مخطط API. code=${error.code}; message=${error.message}; details=${error.details || ""}; hint=${error.hint || ""}`
-  );
-}
-throw new Error(
-  `code=${error.code || "غير محدد"}; message=${error.message}; details=${error.details || ""}; hint=${error.hint || ""}`
-);
-        throw new Error(error.message);
-      }
-      requestAlert.textContent = "تم إرسال طلبك إلى الإدارة بنجاح. لن يتغير فوجك إلا بعد الموافقة.";
-      requestAlert.style.display = "block";
-      document.getElementById("groupRequestReason").value = "";
-      await loadMyGroupRequests();
-    } catch (err) {
-      requestError.textContent = err.message || "تعذر إرسال الطلب. حاول لاحقًا.";
-      requestError.style.display = "block";
-    } finally {
-      requestButton.disabled = false;
-      requestButton.textContent = "إرسال الطلب إلى الإدارة";
-    }
-  };
-
-  loadMyGroupRequests();
   document.getElementById("accountLogoutBtn").onclick = async () => {
     await supabase.auth.signOut();
     state.session = null;
@@ -2990,7 +3092,6 @@ throw new Error(
     state.uploaderGroup = null;
     state.filesCache = [];
     state.teacherInfoCache = [];
-    state.scheduleCache = [];
     state.renderedUserId = null;
     location.hash = "#/";
     renderLoggedOut("تم تسجيل الخروج بنجاح.");
