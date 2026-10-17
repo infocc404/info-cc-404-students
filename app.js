@@ -2958,7 +2958,14 @@ function renderAccountView(page) {
       const { error } = await supabase.from("group_change_requests").insert({ requested_group: requestedGroup, reason });
       if (error) {
         if (error.code === "23505") throw new Error("لديك طلب قيد المراجعة بالفعل. انتظر رد الإدارة قبل إرسال طلب آخر.");
-        if (error.code === "42P01" || error.code === "PGRST205") throw new Error("ميزة الطلبات تحتاج إلى تطبيق ملف migration_group_change_requests.sql في Supabase أولًا.");
+        if (error.code === "42P01" || error.code === "PGRST205") {
+  throw new Error(
+    `تعذر العثور على الجدول في قاعدة البيانات أو مخطط API. code=${error.code}; message=${error.message}; details=${error.details || ""}; hint=${error.hint || ""}`
+  );
+}
+throw new Error(
+  `code=${error.code || "غير محدد"}; message=${error.message}; details=${error.details || ""}; hint=${error.hint || ""}`
+);
         throw new Error(error.message);
       }
       requestAlert.textContent = "تم إرسال طلبك إلى الإدارة بنجاح. لن يتغير فوجك إلا بعد الموافقة.";
