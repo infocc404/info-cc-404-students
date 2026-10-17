@@ -798,7 +798,9 @@ function getAccessibleFiles() {
   return state.filesCache.filter(file => {
     // Course lectures are shared content; other legacy rows without a group are
     // not automatically shared unless stored under common/.
-    if (file.kind === "cours" && (isSharedFile(file) || (file.group_no == null && getFileGroupNo(file) == null))) return true;
+    // A course file is shared only when explicitly stored under common/.
+    // NULL group_no on a legacy/root path is ambiguous and must not expose it to every group.
+    if (file.kind === "cours" && isSharedFile(file)) return true;
     const fileGroup = getFileGroupNo(file);
     if (fileGroup != null) return Number(group) === fileGroup;
     return isSharedFile(file);
@@ -809,6 +811,31 @@ function isFileForGroup(file, groupNo) {
   const fileGroup = getFileGroupNo(file);
   if (fileGroup != null) return fileGroup === Number(groupNo);
   return isSharedFile(file);
+}
+
+// Move a file to another group (or to "all groups"): the storage object and the
+// database row are changed together; if the database update fails the move is undone.
+async function moveFileToGroup(file, targetGroup) {
+  const oldPath = String(file.path || "");
+  const baseName = oldPath.split("/").pop();
+  const newPath = `${targetGroup ? `g${targetGroup}` : "common"}/${baseName}`;
+
+  if (newPath !== oldPath) {
+    const { error: moveErr } = await supabase.storage.from("course-files").move(oldPath, newPath);
+    if (moveErr) throw new Error(moveErr.message);
+  }
+
+  const { error: dbErr } = await supabase
+    .from("files")
+    .update({ group_no: targetGroup, path: newPath })
+    .eq("id", file.id);
+
+  if (dbErr) {
+    if (newPath !== oldPath) {
+      await supabase.storage.from("course-files").move(newPath, oldPath);
+    }
+    throw new Error(dbErr.message);
+  }
 }
 
 // 11. ROUTE DISPATCHER
@@ -1126,7 +1153,7 @@ function renderGroupDetailView(page, groupNo, tab = "cours", subjectId = null) {
                 const count = state.filesCache.filter(f =>
                   f.kind === "cours" &&
                   normalizeSubjectId(f.subject) === sub.id &&
-                  (isSharedFile(f) || (f.group_no == null && getFileGroupNo(f) == null) || isFileForGroup(f, groupNo))
+                  (isSharedFile(f) || isFileForGroup(f, groupNo))
                 ).length;
                 const teacher = getResolvedTeacher("cours", sub.id, 0);
                 return `
@@ -1504,7 +1531,7 @@ function renderSubjectLessonsView(page, groupNo, tab, subjectId) {
     if (!sMatch) return false;
     if (tab === "cours") {
       return f.kind === "cours" &&
-        (isSharedFile(f) || (f.group_no == null && getFileGroupNo(f) == null) || isFileForGroup(f, groupNo));
+        (isSharedFile(f) || isFileForGroup(f, groupNo));
     }
     return f.kind === tab && isFileForGroup(f, groupNo);
   }).sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
@@ -2157,8 +2184,8 @@ async function renderOwnerUsersView(page) {
           <input id="ownerUserSearch" class="form-control" type="search" placeholder="اكتب البريد الإلكتروني">
         </div>
       </div>
-      <div id="ownerUsersNotice" role="status" class="auth-success-box"></div>
-      <div id="ownerUsersError" role="alert" class="auth-error-box"></div>
+      <div id="ownerUsersNotice" role="status" class="auth-success-box" style="display:none;"></div>
+      <div id="ownerUsersError" role="alert" class="auth-error-box" style="display:none;"></div>
       <div id="ownerUsersTable"><p style="padding:18px;color:var(--muted);">جارٍ تحميل قائمة المستخدمين...</p></div>
     </div>
   `;
@@ -2225,18 +2252,19 @@ async function renderOwnerUsersView(page) {
         button.disabled = true;
         button.textContent = action === "suspend" ? "جارٍ الإيقاف..." : "جارٍ التفعيل...";
         try {
-          const { data, error } = await supabase.functions.invoke("manage-user-access", {
-            body: { userId, action }
+          // Owner-only database function (checked again inside the database).
+          const { error } = await supabase.rpc("owner_set_user_suspended", {
+            p_user: userId,
+            p_suspended: action === "suspend"
           });
-          if (error) throw new Error(error.message || "تعذر الاتصال بخدمة إدارة الحسابات.");
-          if (data?.error) throw new Error(data.error);
+          if (error) throw new Error(error.message || "تعذر تنفيذ العملية.");
           noticeBox.textContent = action === "suspend"
-            ? `تم إيقاف حساب ${email}. قد تحتاج الجلسة الحالية إلى انتهاء صلاحية رمز الدخول حتى يتوقف الوصول تمامًا.`
+            ? `تم إيقاف حساب ${email}. لا يستطيع الدخول ولا رؤية أي ملف.`
             : `تمت إعادة تفعيل حساب ${email}.`;
           noticeBox.style.display = "block";
           await loadUsers();
         } catch (error) {
-          errorBox.textContent = `تعذر تنفيذ العملية: ${error.message || "خطأ غير معروف"}. تأكد من نشر Edge Function باسم manage-user-access وتطبيق migration_security_v10.sql.`;
+          errorBox.textContent = `تعذر تنفيذ العملية: ${error.message || "خطأ غير معروف"}. تأكد من تشغيل الملف migration_owner_suspend_v12.sql في Supabase (SQL Editor).`;
           errorBox.style.display = "block";
           button.disabled = false;
           button.textContent = action === "suspend" ? "إيقاف الحساب" : "إعادة التفعيل";
@@ -2675,11 +2703,12 @@ async function renderUploadView(page) {
 
           <div class="form-group" id="uploadGroupWrap">
             <label class="form-label" for="uploadGroup">الفوج المستهدف *</label>
-            <select id="uploadGroup" class="form-control mono" ${!isStaff ? 'disabled' : ''}>
+            <select id="uploadGroup" class="form-control mono" ${!isStaff ? 'disabled' : 'required'}>
               ${
                 isStaff
                   ? `
-                    <option value="all">كل الأفواج (عام)</option>
+                    <option value="">— اختر الفوج —</option>
+                    <option value="all">كل الأفواج (ملف مشترك)</option>
                     ${[1,2,3,4,5,6,7,8,9,10].map(g => `<option value="${g}">G${g}</option>`).join("")}
                   `
                   : `<option value="${upGroup}" selected>G${upGroup} (فوجك فقط)</option>`
@@ -2754,14 +2783,15 @@ async function renderUploadView(page) {
   const allGroupsCheckbox = document.getElementById("uploadAllGroups");
   const handleKindChange = () => {
     if (!isStaff || !groupSelectWrap) return;
-    if (allGroupsCheckbox?.checked || kindSelect.value === "cours") {
-      groupSelectWrap.style.display = "none";
-    } else {
-      groupSelectWrap.style.display = "flex";
-    }
     if (allGroupsCheckbox?.checked) {
+      // One shared PDF for every group: no specific group is needed.
+      groupSelectWrap.style.display = "none";
+      if (groupSelect) groupSelect.required = false;
       uploadBtn.textContent = "رفع الملف الشامل لجميع الأفواج";
     } else {
+      // Otherwise the group must be chosen explicitly, whatever the file type is.
+      groupSelectWrap.style.display = "flex";
+      if (groupSelect) groupSelect.required = true;
       uploadBtn.textContent = "رفع الملف";
     }
   };
@@ -2801,12 +2831,19 @@ async function renderUploadView(page) {
     // A single comprehensive PDF can be shared across all ten groups.
     // Null group_no is intentionally used for shared files and the storage path
     // is placed under common/, matching the existing access policies.
+    // The file goes to the group chosen in the form (for every type, including "cours").
+    // It is shared with all groups ONLY when "all groups" is chosen or the shared-PDF box is ticked.
     let targetGroup = null;
     if (isStaff) {
-      if (allGroupsCheckbox?.checked || kind === "cours") {
+      if (allGroupsCheckbox?.checked) {
         targetGroup = null;
       } else {
         const val = groupSelect.value;
+        if (!val) {
+          uploadAlert.textContent = "اختر الفوج المستهدف، أو اختر \"كل الأفواج\" إذا كان الملف مشتركا.";
+          uploadAlert.style.display = "block";
+          return;
+        }
         targetGroup = val === "all" ? null : parseInt(val, 10);
       }
     } else {
@@ -2907,11 +2944,17 @@ async function renderUploadView(page) {
                 <td><strong>${escapeHtml(f.title)}</strong></td>
                 <td>${escapeHtml(getSubjectObj(normalizeSubjectId(f.subject)).nameEn || getSubjectObj(normalizeSubjectId(f.subject)).nameFr || f.subject)}</td>
                 <td><span class="badge-tag">${escapeHtml(f.kind)}</span></td>
-                <td class="mono">${f.group_no ? `G${f.group_no}` : "كل الأفواج"}</td>
+                <td class="mono">${getFileGroupNo(f) ? `G${getFileGroupNo(f)}` : "مشترك: كل الأفواج"}</td>
                 <td class="mono" style="font-size: 12px;">${formatDate(f.created_at)}</td>
                 <td>
-                  <div style="display: flex; gap: 6px;">
+                  <div style="display: flex; gap: 6px; flex-wrap: wrap; align-items: center;">
                     <a href="#/voir/${f.id}" class="btn-secondary" style="padding: 4px 8px; font-size: 12px; text-decoration: none;">عرض</a>
+                    ${isStaff ? `
+                      <select class="form-control mono move-group-select" data-id="${f.id}" style="width: auto; padding: 4px 8px; font-size: 12px;" title="نقل الملف إلى فوج آخر">
+                        <option value="">نقل إلى...</option>
+                        <option value="all">كل الأفواج</option>
+                        ${[1,2,3,4,5,6,7,8,9,10].map(g => `<option value="${g}">G${g}</option>`).join("")}
+                      </select>` : ""}
                     <button type="button" class="btn-danger delete-file-btn" data-id="${f.id}" data-path="${escapeHtml(f.path)}" data-title="${escapeHtml(f.title)}">حذف</button>
                   </div>
                 </td>
@@ -2921,6 +2964,31 @@ async function renderUploadView(page) {
         </table>
       </div>
     `;
+
+    wrapper.querySelectorAll(".move-group-select").forEach(sel => {
+      sel.onchange = async () => {
+        const val = sel.value;
+        if (!val) return;
+        const file = state.filesCache.find(f => String(f.id) === String(sel.getAttribute("data-id")));
+        if (!file) return;
+        const target = val === "all" ? null : parseInt(val, 10);
+        const label = target ? `G${target}` : "كل الأفواج";
+        if (!confirm(`نقل الملف "${file.title}" إلى ${label}؟`)) {
+          sel.value = "";
+          return;
+        }
+        sel.disabled = true;
+        try {
+          await moveFileToGroup(file, target);
+          await loadFilesCache();
+          renderUploadFilesTable();
+        } catch (err) {
+          alert(`تعذر نقل الملف: ${err.message || err}`);
+          sel.disabled = false;
+          sel.value = "";
+        }
+      };
+    });
 
     wrapper.querySelectorAll(".delete-file-btn").forEach(btn => {
       btn.onclick = async () => {
@@ -2953,7 +3021,7 @@ async function renderUploadView(page) {
     });
   }
 
-  if (isOwner) {
+  if (isStaff) {
     document.getElementById("filterUploadGroup")?.addEventListener("change", renderUploadFilesTable);
     document.getElementById("filterUploadKind")?.addEventListener("change", renderUploadFilesTable);
   }
