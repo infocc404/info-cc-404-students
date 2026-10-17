@@ -875,6 +875,14 @@ function renderHomeView(page) {
       <p>منصة info cc 404 لمشاركة وتصفح ملفات الإعلام الآلي (الدفعة الأولى).</p>
     </div>
 
+    ${!sg && state.role === "student" ? `
+      <div class="content-card" style="border:1px solid var(--brown);background:var(--cream, #fbf7f0);margin-bottom:16px;">
+        <h3 style="font-size:16px;font-weight:700;color:var(--brown-dark);margin-bottom:6px;">لم يتم تعيين فوجك بعد</h3>
+        <p style="font-size:13px;color:var(--muted);line-height:1.8;margin-bottom:12px;">افتح «حسابي»، واختر الفوج الذي تدرس فيه، ثم أرسل طلبًا للإدارة. ستظهر ملفات فوجك بعد موافقة المالك أو المشرف.</p>
+        <a href="#/compte" class="btn-primary" style="display:inline-block;width:auto;text-decoration:none;padding:9px 16px;">اختيار الفوج وإرسال الطلب</a>
+      </div>
+    ` : ''}
+
     <!-- 3 Shortcut Cards -->
     <div class="welcome-grid">
       <a href="${sg ? `#/groupe/${sg}` : '#/groupes'}" class="shortcut-card">
@@ -2581,6 +2589,16 @@ async function renderUploadView(page) {
           </div>
         </div>
 
+        ${isStaff ? `
+          <div class="content-card" style="margin-top:14px;padding:14px 16px;background:var(--cream, #fbf7f0);border:1px solid var(--line);">
+            <label for="uploadAllGroups" style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;font-weight:700;color:var(--brown-dark);">
+              <input type="checkbox" id="uploadAllGroups" style="width:18px;height:18px;margin-top:2px;accent-color:var(--brown);">
+              <span>ملف PDF شامل واحد لجميع الأفواج</span>
+            </label>
+            <p style="margin:7px 0 0 28px;color:var(--muted);font-size:12px;line-height:1.7;">فعّل هذا الخيار إذا كان الملف يحتوي على البرنامج الكامل أو محتوى مشترك. ارفع الملف مرة واحدة فقط، وسيظهر للطلاب في G1 إلى G10 دون الحاجة إلى تكرار رفعه لكل فوج.</p>
+          </div>
+        ` : ''}
+
         <div class="form-group" style="margin-top: 14px;">
           <label class="form-label" for="uploadFileInput">اختر ملف PDF (الحد الأقصى 25 ميغابايت) *</label>
           <input type="file" id="uploadFileInput" class="form-control" accept=".pdf,application/pdf" required>
@@ -2630,23 +2648,29 @@ async function renderUploadView(page) {
   const kindSelect = document.getElementById("uploadKind");
   const groupSelectWrap = document.getElementById("uploadGroupWrap");
   const groupSelect = document.getElementById("uploadGroup");
-
-  if (isStaff && kindSelect && groupSelectWrap) {
-    const handleKindChange = () => {
-      if (kindSelect.value === "cours") {
-        groupSelectWrap.style.display = "none";
-      } else {
-        groupSelectWrap.style.display = "flex";
-      }
-    };
-    kindSelect.onchange = handleKindChange;
-    handleKindChange();
-  }
-
   const uploadForm = document.getElementById("fileUploadForm");
   const uploadBtn = document.getElementById("uploadSubmitBtn");
   const uploadAlert = document.getElementById("uploadAlertBox");
   const uploadSuccess = document.getElementById("uploadSuccessBox");
+  const allGroupsCheckbox = document.getElementById("uploadAllGroups");
+  const handleKindChange = () => {
+    if (!isStaff || !groupSelectWrap) return;
+    if (allGroupsCheckbox?.checked || kindSelect.value === "cours") {
+      groupSelectWrap.style.display = "none";
+    } else {
+      groupSelectWrap.style.display = "flex";
+    }
+    if (allGroupsCheckbox?.checked) {
+      uploadBtn.textContent = "رفع الملف الشامل لجميع الأفواج";
+    } else {
+      uploadBtn.textContent = "رفع الملف";
+    }
+  };
+  if (isStaff && kindSelect && groupSelectWrap) {
+    kindSelect.onchange = handleKindChange;
+    if (allGroupsCheckbox) allGroupsCheckbox.onchange = handleKindChange;
+    handleKindChange();
+  }
 
   uploadForm.onsubmit = async (e) => {
     e.preventDefault();
@@ -2675,9 +2699,12 @@ async function renderUploadView(page) {
       return;
     }
 
+    // A single comprehensive PDF can be shared across all ten groups.
+    // Null group_no is intentionally used for shared files and the storage path
+    // is placed under common/, matching the existing access policies.
     let targetGroup = null;
     if (isStaff) {
-      if (kind === "cours") {
+      if (allGroupsCheckbox?.checked || kind === "cours") {
         targetGroup = null;
       } else {
         const val = groupSelect.value;
@@ -2727,7 +2754,7 @@ async function renderUploadView(page) {
       uploadSuccess.textContent = "تم رفع الملف وحفظه بنجاح.";
       uploadSuccess.style.display = "block";
       uploadForm.reset();
-      if (isStaff && typeof handleKindChange === "function") handleKindChange();
+      handleKindChange();
 
       await loadFilesCache();
       renderUploadFilesTable();
@@ -2736,7 +2763,7 @@ async function renderUploadView(page) {
       uploadAlert.style.display = "block";
     } finally {
       uploadBtn.disabled = false;
-      uploadBtn.textContent = "رفع الملف";
+      handleKindChange();
     }
   };
 
@@ -2866,7 +2893,8 @@ function renderAccountView(page) {
 
       <section aria-labelledby="groupRequestTitle">
         <h3 id="groupRequestTitle" style="font-size:17px;font-weight:700;color:var(--brown-dark);margin-bottom:8px;">طلب تغيير / تعيين الفوج</h3>
-        <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">إذا كان فوجك غير محدد أو تغيّر فوجك، أرسل طلبًا للإدارة. سيبقى فوجك الحالي كما هو حتى تراجع الإدارة الطلب.</p>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:8px;">اختر الفوج الذي تدرس فيه فعلًا من القائمة ثم أرسل الطلب. لن يتغير فوجك مباشرة؛ المالك أو المشرف يراجع الطلب ويوافق عليه أولًا حتى لا يستطيع أي شخص تغيير صلاحياته بنفسه.</p>
+        <p style="font-size:12px;color:var(--muted);margin-bottom:16px;">بعد الموافقة، حدّث الصفحة أو سجّل الخروج ثم الدخول مجددًا حتى تظهر ملفات فوجك الصحيح.</p>
         <div id="groupRequestAlert" role="status" class="auth-success-box"></div>
         <div id="groupRequestError" role="alert" class="auth-error-box"></div>
         <form id="groupChangeRequestForm" style="display:grid;gap:12px;">
