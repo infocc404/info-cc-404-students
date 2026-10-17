@@ -2179,6 +2179,13 @@ async function renderAdminView(page) {
       <p>${state.role === "owner" ? "إدارة وتعيين المشرفين ورؤساء الأقسام." : "إدارة وتعيين رؤساء الأقسام للأفواج الدراسية."}</p>
     </div>
 
+    <!-- Student group-change requests: visible only to owner/admin through the protected admin route -->
+    <div class="content-card">
+      <h3 style="font-size:16px;font-weight:700;color:var(--brown-dark);margin-bottom:6px;">طلبات تعيين / تغيير الأفواج</h3>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:12px;">راجع طلبات الطلاب. الموافقة تغيّر الفوج المعتمد في قاعدة البيانات؛ الرفض لا يغيّر فوج الطالب.</p>
+      <div id="groupRequestsAdminTable"><p style="padding:16px;color:var(--muted);">جاري تحميل الطلبات...</p></div>
+    </div>
+
     ${state.role === "owner" ? `
     <!-- Card 0: Admins (owner only) -->
     <div class="content-card">
@@ -2234,6 +2241,50 @@ async function renderAdminView(page) {
       </div>
     </div>
   `;
+
+  const adminRequestsWrapper = document.getElementById("groupRequestsAdminTable");
+  async function loadGroupChangeRequestsForAdmin() {
+    if (!adminRequestsWrapper) return;
+    try {
+      const { data, error } = await supabase.from("group_change_requests")
+        .select("id,user_id,current_group,requested_group,reason,status,created_at,student_email,admin_note")
+        .eq("status", "pending").order("created_at", { ascending: true }).limit(100);
+      if (error) throw error;
+      if (!data || data.length === 0) {
+        adminRequestsWrapper.innerHTML = `<p style="padding:16px;color:var(--muted);">لا توجد طلبات جديدة قيد المراجعة.</p>`;
+        return;
+      }
+      adminRequestsWrapper.innerHTML = `<div class="table-responsive"><table class="data-table"><thead><tr><th>بريد الطالب</th><th>الفوج الحالي</th><th>الفوج المطلوب</th><th>السبب</th><th>الإجراء</th></tr></thead><tbody>${data.map(r => `<tr><td class="mono">${escapeHtml(r.student_email || "—")}</td><td class="mono">${r.current_group ? `G${r.current_group}` : "غير محدد"}</td><td class="mono">G${r.requested_group}</td><td style="min-width:180px;white-space:normal;">${escapeHtml(r.reason)}</td><td><div style="display:flex;gap:6px;flex-wrap:wrap;"><button type="button" class="btn-primary group-request-approve" data-id="${r.id}" data-group="${r.requested_group}" style="width:auto;padding:6px 10px;">موافقة</button><button type="button" class="btn-danger group-request-reject" data-id="${r.id}" style="width:auto;padding:6px 10px;">رفض</button></div></td></tr>`).join("")}</tbody></table></div>`;
+      adminRequestsWrapper.querySelectorAll(".group-request-approve").forEach(btn => {
+        btn.onclick = async () => {
+          const id = Number(btn.dataset.id);
+          const group = Number(btn.dataset.group);
+          const note = prompt(`أضف ملاحظة للطالب (اختياري). سيتم تعيينه إلى G${group}:`, "");
+          if (note === null) return;
+          btn.disabled = true;
+          const { error: reviewError } = await supabase.rpc("review_group_change_request", { p_request_id: id, p_approve: true, p_admin_note: note.trim() || null });
+          if (reviewError) { alert(`تعذرت الموافقة: ${reviewError.message}`); btn.disabled = false; return; }
+          alert(`تمت الموافقة وتعيين الفوج G${group}.`);
+          await loadGroupChangeRequestsForAdmin();
+        };
+      });
+      adminRequestsWrapper.querySelectorAll(".group-request-reject").forEach(btn => {
+        btn.onclick = async () => {
+          const id = Number(btn.dataset.id);
+          const note = prompt("اكتب سبب الرفض أو ملاحظة للطالب:", "");
+          if (note === null) return;
+          btn.disabled = true;
+          const { error: reviewError } = await supabase.rpc("review_group_change_request", { p_request_id: id, p_approve: false, p_admin_note: note.trim() || null });
+          if (reviewError) { alert(`تعذر رفض الطلب: ${reviewError.message}`); btn.disabled = false; return; }
+          await loadGroupChangeRequestsForAdmin();
+        };
+      });
+    } catch (err) {
+      console.warn("Could not load admin group requests:", err);
+      adminRequestsWrapper.innerHTML = `<div class="auth-error-box" style="display:block;">تعذر تحميل الطلبات. تأكد من تطبيق ملف migration_group_change_requests.sql في Supabase. التفاصيل: ${escapeHtml(err.message || "Unknown error")}</div>`;
+    }
+  }
+  loadGroupChangeRequestsForAdmin();
 
   const addForm = document.getElementById("addHeadForm");
   const alertErr = document.getElementById("addHeadAlertError");
@@ -2787,41 +2838,115 @@ async function renderUploadView(page) {
 // 21. PAGE: ACCOUNT (#/compte)
 function renderAccountView(page) {
   const sg = state.studentGroup;
+  const groupOptions = [1,2,3,4,5,6,7,8,9,10].map(g => `<option value="${g}">G${g}</option>`).join("");
   page.innerHTML = `
     <div class="page-banner">
       <h2>حسابي</h2>
       <p>تفاصيل الحساب الدراسي والصلاحيات المسجلة.</p>
     </div>
 
-    <div class="content-card" style="max-width: 600px;">
+    <div class="content-card" style="max-width: 720px;">
       <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 24px;">
         <div class="user-avatar-circle" style="width: 56px; height: 56px; font-size: 22px;">
           ${escapeHtml(state.user.email?.[0]?.toUpperCase() || "U")}
         </div>
         <div>
           <h3 style="font-size: 18px; font-weight: 600; color: var(--brown-dark);" class="mono">${escapeHtml(state.user.email)}</h3>
-          <span class="role-badge ${state.role}" style="display: inline-block; margin-top: 4px;">
-            ${getRoleBadgeText(state.role, state.uploaderGroup)}
-          </span>
+          <span class="role-badge ${state.role}" style="display: inline-block; margin-top: 4px;">${getRoleBadgeText(state.role, state.uploaderGroup)}</span>
         </div>
       </div>
 
       <div class="form-group">
         <label class="form-label">فوجك الدراسي المسجل:</label>
-        <div style="font-weight: 600; font-size: 16px; color: var(--brown-dark);" class="mono">
-          ${sg ? `الفوج G${sg}` : "غير محدد (يرجى مراجعة إدارة المنصة)"}
-        </div>
-        <small style="color: var(--muted); font-size: 12px;">الفوج موثق ومعتمد من قاعدة البيانات ولا يمكن تعديله عبر بيانات الحساب المحلية.</small>
+        <div style="font-weight: 600; font-size: 16px; color: var(--brown-dark);" class="mono">${sg ? `الفوج G${sg}` : "غير محدد — يمكنك إرسال طلب إلى الإدارة لتعيين فوجك."}</div>
+        <small style="color: var(--muted); font-size: 12px;">لا يتغير الفوج إلا بعد موافقة الإدارة.</small>
       </div>
 
       <hr style="border: 0; border-top: 1px solid var(--line); margin: 24px 0;">
 
-      <button type="button" class="btn-danger" id="accountLogoutBtn" style="padding: 10px 20px; font-size: 14px;">
-        تسجيل الخروج من الحساب
-      </button>
+      <section aria-labelledby="groupRequestTitle">
+        <h3 id="groupRequestTitle" style="font-size:17px;font-weight:700;color:var(--brown-dark);margin-bottom:8px;">طلب تغيير / تعيين الفوج</h3>
+        <p style="font-size:13px;color:var(--muted);margin-bottom:16px;">إذا كان فوجك غير محدد أو تغيّر فوجك، أرسل طلبًا للإدارة. سيبقى فوجك الحالي كما هو حتى تراجع الإدارة الطلب.</p>
+        <div id="groupRequestAlert" role="status" class="auth-success-box"></div>
+        <div id="groupRequestError" role="alert" class="auth-error-box"></div>
+        <form id="groupChangeRequestForm" style="display:grid;gap:12px;">
+          <div class="form-group" style="margin-bottom:0;">
+            <label class="form-label" for="requestedGroupSelect">الفوج المطلوب *</label>
+            <select id="requestedGroupSelect" class="form-control mono" required>${groupOptions}</select>
+          </div>
+          <div class="form-group" style="margin-bottom:0;">
+            <label class="form-label" for="groupRequestReason">سبب الطلب *</label>
+            <textarea id="groupRequestReason" class="form-control" rows="3" maxlength="1000" required placeholder="مثال: فوجي غير ظاهر في حسابي، وأرغب في تعيين الفوج الصحيح."></textarea>
+          </div>
+          <button type="submit" class="btn-primary" id="sendGroupRequestBtn" style="width:auto;justify-self:start;padding:10px 18px;">إرسال الطلب إلى الإدارة</button>
+        </form>
+        <div style="margin-top:22px;">
+          <h4 style="font-size:14px;font-weight:700;color:var(--brown-dark);margin-bottom:10px;">طلباتي السابقة</h4>
+          <div id="myGroupRequests"><p style="color:var(--muted);font-size:13px;">جاري تحميل الطلبات...</p></div>
+        </div>
+      </section>
+
+      <hr style="border: 0; border-top: 1px solid var(--line); margin: 24px 0;">
+      <button type="button" class="btn-danger" id="accountLogoutBtn" style="padding: 10px 20px; font-size: 14px;">تسجيل الخروج من الحساب</button>
     </div>
   `;
 
+  const requestForm = document.getElementById("groupChangeRequestForm");
+  const requestAlert = document.getElementById("groupRequestAlert");
+  const requestError = document.getElementById("groupRequestError");
+  const requestButton = document.getElementById("sendGroupRequestBtn");
+  const requestsContainer = document.getElementById("myGroupRequests");
+  const statusLabels = { pending: "قيد المراجعة", approved: "تمت الموافقة", rejected: "مرفوض" };
+  const statusColors = { pending: "#8a6d3b", approved: "#28734a", rejected: "#a33b32" };
+
+  async function loadMyGroupRequests() {
+    try {
+      const { data, error } = await supabase.from("group_change_requests")
+        .select("id,current_group,requested_group,reason,status,admin_note,created_at,reviewed_at")
+        .order("created_at", { ascending: false }).limit(20);
+      if (error) throw error;
+      if (!data || data.length === 0) {
+        requestsContainer.innerHTML = `<p style="color:var(--muted);font-size:13px;">لا توجد طلبات سابقة.</p>`;
+        return;
+      }
+      requestsContainer.innerHTML = `<div class="table-responsive"><table class="data-table"><thead><tr><th>الفوج الحالي</th><th>الفوج المطلوب</th><th>الحالة</th><th>تاريخ الطلب</th><th>ملاحظة الإدارة</th></tr></thead><tbody>${data.map(r => `<tr><td class="mono">${r.current_group ? `G${r.current_group}` : "غير محدد"}</td><td class="mono">G${r.requested_group}</td><td><span style="font-weight:700;color:${statusColors[r.status] || 'var(--muted)'}">${statusLabels[r.status] || escapeHtml(r.status)}</span></td><td>${r.created_at ? new Date(r.created_at).toLocaleDateString() : "—"}</td><td>${escapeHtml(r.admin_note || "—")}</td></tr>`).join("")}</tbody></table></div>`;
+    } catch (err) {
+      console.warn("Could not load group change requests:", err);
+      requestsContainer.innerHTML = `<p style="color:var(--muted);font-size:13px;">تعذر تحميل الطلبات. إذا لم تُطبّق ترقية قاعدة البيانات، اطلب من الإدارة تطبيق ملف migration_group_change_requests.sql.</p>`;
+    }
+  }
+
+  requestForm.onsubmit = async (e) => {
+    e.preventDefault();
+    requestAlert.style.display = "none";
+    requestError.style.display = "none";
+    requestButton.disabled = true;
+    requestButton.textContent = "جارٍ إرسال الطلب...";
+    try {
+      const requestedGroup = parseInt(document.getElementById("requestedGroupSelect").value, 10);
+      const reason = document.getElementById("groupRequestReason").value.trim();
+      if (!Number.isInteger(requestedGroup) || requestedGroup < 1 || requestedGroup > 10) throw new Error("اختر فوجًا صحيحًا من G1 إلى G10.");
+      if (reason.length < 5) throw new Error("يرجى كتابة سبب واضح للطلب (5 أحرف على الأقل).");
+      const { error } = await supabase.from("group_change_requests").insert({ requested_group: requestedGroup, reason });
+      if (error) {
+        if (error.code === "23505") throw new Error("لديك طلب قيد المراجعة بالفعل. انتظر رد الإدارة قبل إرسال طلب آخر.");
+        if (error.code === "42P01" || error.code === "PGRST205") throw new Error("ميزة الطلبات تحتاج إلى تطبيق ملف migration_group_change_requests.sql في Supabase أولًا.");
+        throw new Error(error.message);
+      }
+      requestAlert.textContent = "تم إرسال طلبك إلى الإدارة بنجاح. لن يتغير فوجك إلا بعد الموافقة.";
+      requestAlert.style.display = "block";
+      document.getElementById("groupRequestReason").value = "";
+      await loadMyGroupRequests();
+    } catch (err) {
+      requestError.textContent = err.message || "تعذر إرسال الطلب. حاول لاحقًا.";
+      requestError.style.display = "block";
+    } finally {
+      requestButton.disabled = false;
+      requestButton.textContent = "إرسال الطلب إلى الإدارة";
+    }
+  };
+
+  loadMyGroupRequests();
   document.getElementById("accountLogoutBtn").onclick = async () => {
     await supabase.auth.signOut();
     state.session = null;
